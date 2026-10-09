@@ -30,7 +30,15 @@ cd code/build
 make fx-wizard-plus
 ```
 
-The UF2 ends up in `code/build/output`. It uses app ID `0x7F` (community range), so it keeps its own settings in the
+The UF2 ends up in `code/build/output`.
+
+Build size (Release, Arm GNU Toolchain 14.2.Rel1, Pico SDK 2.3.1) compared with the stock FX Wizard: flash 442,004 B
+(84.3% of 512 KB, stock 431,828 B), static RAM 23,568 B (stock 23,028 B), FASTCODE 9,928 B (stock 9,616 B).
+Free heap is about 5 kB, stock has about 6 kB, so there is no room for more buffers.
+
+Outside the Nix shell, with Arm's own toolchain package, the link can fail with `undefined reference to __dso_handle`
+(it happens with the stock FX Wizard too: the link uses `-nostartfiles`). Adding
+`-DCMAKE_CXX_STANDARD_LIBRARIES=-Wl,--defsym,__dso_handle=0` to the `cmake` command works around it. It uses app ID `0x7F` (community range), so it keeps its own settings in the
 EEPROM and never touches the settings of the stock FX Wizard (`0xB1`). Calibration is stored separately and is not
 affected. If you distribute this, register an ID in [APP_LIST.md](../../../../APP_LIST.md) first.
 
