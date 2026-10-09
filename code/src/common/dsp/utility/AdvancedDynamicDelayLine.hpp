@@ -135,6 +135,16 @@ public:
     }
 
     /**
+     * @brief Raw access to the sample memory (GetMaxLength() items).
+     * @note This lets an app lend the memory to something else while the delay line is not in use,
+     *       when there's no RAM to spare. Don't call Read() or Write() while borrowing it.
+     */
+    T inline *GetBuffer()
+    {
+        return line_.get();
+    }
+
+    /**
      * @brief Sets the Length of the record and playback buffer to the entire actual buffer
      */
     void inline SetLengthBothToMax()
