@@ -1,3 +1,18 @@
+# Sungam Citadel FX Wizard firmware
+
+A custom firmware for the Bastl **Citadel FX Wizard** (and Kastle 2), based on Bastl's open-source Kastle 2 code.
+It replaces the FX Wizard effects with seven: **delay, chorus, phaser, reverb (hall), reverb (plate), distortion and
+pitch shifter**. Delay is the stock FX Wizard delay, the rest are new.
+
+- Firmware app: [`code/src/apps/FxWizardPlus`](code/src/apps/FxWizardPlus/README.md) (controls, build notes, how it fits in RAM)
+- Build: `cd code/build && make fx-wizard-plus` (see [TOOLCHAIN_INSTALL.md](TOOLCHAIN_INSTALL.md))
+- Status: builds and passes the PC tests in `code/src/apps/FxWizardPlus/tools`, **not yet tested on hardware**.
+  Keep the factory firmware at hand when trying it.
+
+Everything below is the original Kastle 2 README by Bastl Instruments.
+
+---
+
 # Kastle 2
 
 *Compatible with [Bastl Instruments Citadel](https://github.com/bastl-instruments/citadel)*
