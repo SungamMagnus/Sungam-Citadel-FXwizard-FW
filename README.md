@@ -6,8 +6,8 @@ pitch shifter**. Delay is the stock FX Wizard delay, the rest are new.
 
 - Firmware app: [`code/src/apps/FxWizardPlus`](code/src/apps/FxWizardPlus/README.md) (controls, build notes, how it fits in RAM)
 - Build: `cd code/build && make fx-wizard-plus` (see [TOOLCHAIN_INSTALL.md](TOOLCHAIN_INSTALL.md))
-- Status: builds and passes the PC tests in `code/src/apps/FxWizardPlus/tools`, **not yet tested on hardware**.
-  Keep the factory firmware at hand when trying it.
+- Status: v1.0.0, tested and working on a Citadel FX Wizard. The firmware file is on the
+  [releases page](https://github.com/SungamMagnus/Sungam-Citadel-FXwizard-FW/releases).
 
 Everything below is the original Kastle 2 README by Bastl Instruments.
 
