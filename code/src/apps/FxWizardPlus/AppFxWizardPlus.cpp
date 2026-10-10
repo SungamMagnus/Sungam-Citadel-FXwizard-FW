@@ -130,54 +130,6 @@ void AppFxWizardPlus::Init()
     dj_filter_left_.SetResonance(0.0f, Svf::ForceValue::TRUE);
     dj_filter_right_.SetResonance(0.0f, Svf::ForceValue::TRUE);
 
-    crusher_threshold_ = Q15_ZERO;
-    crusher_left_ = Q15_ZERO;
-    crusher_right_ = Q15_ZERO;
-    crusher_frequency_ = 0.f;
-    crusher_stereo_mix_ = Q15_ZERO;
-    crusher_env_.Init(SAMPLE_RATE);
-    crusher_env_.SetAttackTime(kCrusherEnvAttack);
-    crusher_env_.SetDecayTime(1.f);
-    crusher_env_.SetSustainLevel(Q31_ZERO);
-    crusher_env_.SetReleaseTime(0.f);
-    crusher_env_mod_ = Q15_ZERO;
-    crusher_left_frequency_ = Q31_ZERO;
-    crusher_right_frequency_ = Q31_ZERO;
-    crusher_xor_ = 0;
-
-    flanger_depth_ = Q15_ZERO;
-    flanger_dry_wet_ = Q15_ZERO;
-    flanger_frequency_ = 0.f;
-    flanger_stereo_mix_ = Q15_ZERO;
-
-    panner_clip_.Init(SAMPLE_RATE);
-    panner_clip_.DisableVolumeCompensation(true);
-    panner_depth_ = Q15_ZERO;
-    panner_frequency_ = 0.f;
-    panner_stereo_mix_ = Q15_ZERO;
-
-    freezer_length_left_ = 0;
-    freezer_length_right_ = 0;
-    freezer_grab_continuous_ = false;
-    freezer_grab_continuous_prev_ = false;
-    freezer_grab_buffer_ = false;
-    freezer_grab_prev_ = false;
-    freezer_grab_cnt_ = 0;
-    freezer_clock_triggered_ = false;
-    freezer_wait_for_clock_ = false;
-    freezer_feedback_ = Q15_ZERO;
-    freezer_feedback_dry = Q15_ZERO;
-    freezer_record_length_ = 0;
-    freezer_can_use_feedback_prev_ = false;
-    freezer_start_ptr_left_ = 0;
-    freezer_start_ptr_right_ = 0;
-
-    replayer_dry_wet_ = Q15_ZERO;
-    replayer_oversampling_ = 0;
-    replayer_hold_ = false;
-    replayer_stereo_oversampling_ = 0;
-    replayer_filling_ = true;
-
     pitcher_frequency_ = 0.f;
     pitcher_dry_wet_ = Q15_ZERO;
     pitcher_depth_ = Q15_ZERO;
@@ -190,18 +142,6 @@ void AppFxWizardPlus::Init()
     pitcher_env_depth_ = Q31_ZERO;
     pitcher_depth_modulated_ = Q31_ZERO;
 
-    shifter_direction_ = false;
-    shifter_dry_ = Q15_ZERO;
-    shifter_frequency_ = 0.f;
-    shifter_env_.Init(AUDIO_LOOP_RATE);
-    shifter_env_.SetAttackTime(kShifterEnvAttack);
-    shifter_env_.SetDecayTime(kShifterEnvDecay);
-    shifter_env_.SetSustainLevel(Q31_ZERO);
-    shifter_env_.SetReleaseTime(0.f);
-    shifter_env_mod_ = Q15_ZERO;
-    shifter_left_frequency_ = Q31_ZERO;
-    shifter_right_frequency_ = Q31_ZERO;
-
     delay_left_ = std::make_unique<AdvancedDynamicDelayLine<q15least_t>>(50800);
     delay_right_ = std::make_unique<AdvancedDynamicDelayLine<q15least_t>>(50800);
 
@@ -209,7 +149,8 @@ void AppFxWizardPlus::Init()
     // Each of them checks that the buffers are big enough and stays silent if not.
     reverb_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     chorus_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
-    pitch_shifter_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
+    plate_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
+    phaser_.Reset();
     delay_pool_dirty_ = false; // the delay lines start out zeroed
     delay_compressor_.Init(SAMPLE_RATE / delay_peak_counter_max_);
     delay_compressor_.SetAttackTime(50.f / 1000.f);
@@ -236,24 +177,6 @@ void AppFxWizardPlus::Init()
 
     lfo_left_.Init(SAMPLE_RATE);
     lfo_right_.Init(SAMPLE_RATE);
-
-    slicer_env_left_.Init(SAMPLE_RATE);
-    slicer_env_left_.SetAttackTime(0.01f);
-    slicer_env_left_.SetSustainLevel(Q31_ZERO);
-    slicer_env_left_.SetReleaseTime(0.f);
-    slicer_env_right_.Init(SAMPLE_RATE);
-    slicer_env_right_.SetAttackTime(0.01f);
-    slicer_env_right_.SetSustainLevel(Q31_ZERO);
-    slicer_env_right_.SetReleaseTime(0.f);
-    slicer_pattern_left_ = 0;
-    slicer_pattern_right_ = 0;
-    slicer_step_ = 0;
-    slicer_clock_trigger = false;
-    slicer_decay_ = 0.f;
-    slicer_lfo_prev_ = false;
-    slicer_stereo_ = 0;
-    slicer_chance_ = 0;
-    slicer_flip_bit_ = false;
 
     // Normal layer
     pots_[Pot::TIME_MOD] = FancyPot::Create(
@@ -371,7 +294,7 @@ FASTCODE void AppFxWizardPlus::AudioLoop(q15_t *input, q15_t *output, size_t siz
     // See the comment at reverb_ready_
     reverb_ready_ = reverb_ready_ && mode_ == Mode::REVERB;
     chorus_ready_ = chorus_ready_ && mode_ == Mode::CHORUS;
-    pitch_shifter_ready_ = pitch_shifter_ready_ && mode_ == Mode::PITCH_SHIFTER;
+    plate_ready_ = plate_ready_ && mode_ == Mode::PLATE;
 
     // Set data for the second core
     input_buffer_ = input;
@@ -388,7 +311,7 @@ FASTCODE void AppFxWizardPlus::AudioLoop(q15_t *input, q15_t *output, size_t siz
         input_right_ = input[2 * i + 1];
         // Because of performance requirements, some things need to be calculated only a few times per buffer
         sample_being_processed_ = i;
-        if (mode_ != Mode::DELAY && mode_ != Mode::REPLAYER && mode_ != Mode::FREEZER)
+        if (mode_ != Mode::DELAY)
         {
             input_left_ = q15_add(
                 q15_mult(q15_div(feedback_delay_left_->Read(), 27853), feedback_volume_),
@@ -406,62 +329,32 @@ FASTCODE void AppFxWizardPlus::AudioLoop(q15_t *input, q15_t *output, size_t siz
 
         switch (mode_)
         {
-        case Mode::CRUSHER:
-            ModeCrusher();
-            break;
-
-        case Mode::FLANGER:
-            ModeFlanger();
-            break;
-
-        case Mode::PANNER:
-            ModePanner();
-            break;
-
-        case Mode::FREEZER:
-            ModeFreezer();
-            break;
-
-        case Mode::REPLAYER:
-            ModeReplayer();
-            output_left_ = q15_add(
-                q15_mult(q15_div(feedback_delay_left_->Read(), 27853), feedback_volume_),
-                q15_mult(output_left_, (Q15_MAX - feedback_volume_) / 2 + Q15_HALF));
-            output_right_ = q15_add(
-                q15_mult(q15_div(feedback_delay_right_->Read(), 27853), feedback_volume_),
-                q15_mult(output_right_, (Q15_MAX - feedback_volume_) / 2 + Q15_HALF));
-            break;
-
-        case Mode::PITCHER:
-            ModePitcher();
-            break;
-
         case Mode::DELAY:
             ModeDelay();
-            break;
-
-        case Mode::SLICER:
-            ModeSlicer();
-            break;
-
-        case Mode::SHIFTER:
-            ModeShifter();
-            break;
-
-        case Mode::REVERB:
-            ModeReverb();
             break;
 
         case Mode::CHORUS:
             ModeChorus();
             break;
 
+        case Mode::PHASER:
+            ModePhaser();
+            break;
+
+        case Mode::REVERB:
+            ModeReverb();
+            break;
+
+        case Mode::PLATE:
+            ModePlate();
+            break;
+
         case Mode::DISTORTION:
             ModeDistortion();
             break;
 
-        case Mode::PITCH_SHIFTER:
-            ModePitchShifter();
+        case Mode::PITCHER:
+            ModePitcher();
             break;
         }
 
@@ -503,7 +396,7 @@ FASTCODE void AppFxWizardPlus::SecondCoreProcess(size_t index)
     right = q15_div(right, Q15_HALF);
 
     // Write back feedback (after DJ filter)
-    if (mode_ != Mode::DELAY && mode_ != Mode::FREEZER)
+    if (mode_ != Mode::DELAY)
     {
         // feedback_delay_left_->Write(feedback_filter_lp_left_.Process(feedback_filter_left_.Process(feedback_clip_.Process(left))));
         // feedback_delay_right_->Write(feedback_filter_lp_right_.Process(feedback_filter_right_.Process(feedback_clip_.Process(right))));
@@ -595,7 +488,7 @@ void AppFxWizardPlus::UiLoop()
     Kastle2::codec.SetZeroCrossUpdate(Kastle2::base.GetInputEnvelopeFollower().GetEnvelope() > q15(0.05f));
 
     // Get clock and sh triggers
-    bool clock_triggered = clock_trigger_;
+    // (none of the remaining modes needs the clock trigger on its own)
     clock_trigger_ = false;
 
     bool time_sh_triggered = time_sh_trigger_;
@@ -661,123 +554,6 @@ void AppFxWizardPlus::UiLoop()
 
     switch (mode_)
     {
-    case Mode::CRUSHER:
-        SetDryWet(curve_map(dry_wet, kMapCrusherGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapCrusherGlobalFeedbackDelay);
-        feedback_volume_ = curve_map(feedback, kMapCrusherGlobalFeedbackVolume);
-        crusher_frequency_ = curve_map(time, kMapCrusherFrequency, MapClamp::TRUE, MapSafe::TRUE) / 2; // make smaller so it can be expanded later
-        crusher_threshold_ = curve_map(dry_wet, kMapCrusherThreshold);
-        crusher_threshold_ = constrain(crusher_threshold_, Q15_MIN, curve_map(crusher_frequency_, kMapCrusherThresholdCompensation));
-        crusher_stereo_mix_ = curve_map(stereo, kMapCrusherStereoMix);
-        crusher_left_frequency_ = constrain(q31_mult(crusher_frequency_, curve_map(stereo, kMapCrusherStereoFrequencyLeft, MapClamp::TRUE, MapSafe::TRUE)), Q31_ZERO, Q31_MAX / 2) * 2;
-        crusher_right_frequency_ = constrain(q31_mult(crusher_frequency_, curve_map(stereo, kMapCrusherStereoFrequencyRight, MapClamp::TRUE, MapSafe::TRUE)), Q31_ZERO, Q31_MAX / 2) * 2;
-        crusher_env_mod_ = curve_map(time, kMapCrusherEnvMod);
-        crusher_env_.SetDecayTime(curve_map(time, kMapCrusherEnvDecay));
-        crusher_xor_ = curve_map(dry_wet, kMapCrusherXor);
-        break;
-
-    case Mode::FLANGER:
-        SetDryWet(curve_map(dry_wet, kMapFlangerGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapFlangerGlobalFeedbackDelay);
-        feedback_volume_ = curve_map(feedback, kMapFlangerGlobalFeedbackVolume);
-        flanger_frequency_ = curve_map(time, kMapFlangerFrequency, MapClamp::TRUE, MapSafe::TRUE);
-        lfo_left_.SetNativeFrequency(flanger_frequency_);
-        lfo_right_.SetNativeFrequency(q31_add(flanger_frequency_, curve_map(stereo, kMapFlangerStereoFrequency, MapClamp::TRUE, MapSafe::TRUE)));
-        flanger_depth_ = curve_map(dry_wet, kMapFlangerDepth);
-        flanger_dry_wet_ = curve_map(dry_wet, kMapFlangerDryWet);
-        flanger_stereo_mix_ = curve_map(stereo, kMapFlangerStereoMix);
-        // hold stereo lfo in reset for smoother transition
-        if (stereo == 0)
-        {
-            lfo_right_.Reset();
-        }
-        break;
-
-    case Mode::PANNER:
-        SetDryWet(curve_map(dry_wet, kMapPannerGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapPannerGlobalFeedbackDelay);
-        feedback_volume_ = curve_map(feedback, kMapPannerGlobalFeedbackVolume);
-        panner_depth_ = curve_map(dry_wet, kMapPannerDepth);
-        panner_stereo_mix_ = curve_map(stereo, kMapPannerStereoMix);
-        panner_clip_.SetDrive(curve_map(pots_[Pot::AMOUNT]->GetValue(), kMapPannerDistortion));
-
-        panner_frequency_ = curve_map(time, kMapPannerFrequency, MapClamp::TRUE, MapSafe::TRUE);
-        panner_stereo_left_ = curve_map(stereo, kMapPannerStereoLeft, MapClamp::TRUE, MapSafe::TRUE) * curve_map(time, kMapPannerStereoTimeAdjust);
-        panner_stereo_right_ = curve_map(stereo, kMapPannerStereoRight, MapClamp::TRUE, MapSafe::TRUE) * curve_map(time, kMapPannerStereoTimeAdjust);
-        lfo_left_.SetNativeFrequency(q31_add(panner_frequency_, panner_stereo_left_));
-        lfo_right_.SetNativeFrequency(q31_add(panner_frequency_, panner_stereo_right_));
-        break;
-
-    case Mode::FREEZER:
-        freezer_grab_continuous_ = dry_wet < kMapFreezerSampleThreshold;
-        SetDryWet(curve_map(dry_wet, kMapFreezerGlobalDryWet));
-        freezer_feedback_ = curve_map(feedback, kMapFreezerFeedback);
-        freezer_feedback_dry = curve_map(feedback, kMapFreezerFeedbackDry);
-        if (time < POT_HALF)
-        {
-            // convert ticks per clock beat to samples per clock beat, than make it a whole bar instead of a beat
-            size_t ticks = Kastle2::base.GetClock().GetTargetTicks() * buffer_size_ * 4;
-            // divide until it fits
-            while (ticks > delay_left_->GetMaxLength() && ticks != 0)
-            {
-                ticks /= 2;
-            }
-
-            freezer_length_left_ = ticks / step_map(time, kMapFreezerPitchRatio) + curve_map(stereo, kMapFreezerStereo);
-            freezer_length_right_ = ticks / step_map(time, kMapFreezerPitchRatio);
-
-            size_t fit_to_buffer = ticks;
-
-            // In rare case ticks == 0, skip this
-            while ((fit_to_buffer + ticks < delay_left_->GetMaxLength()) && ticks != 0)
-            {
-                fit_to_buffer += ticks;
-            }
-            // we need this to fill as much of the buffer as we can, but than sync the pointers without noticing
-            freezer_record_length_ = fit_to_buffer;
-        }
-        else
-        {
-            freezer_length_left_ = (curve_map(time, kMapFreezerPitchTone)) + curve_map(stereo, kMapFreezerStereo);
-            freezer_length_right_ = curve_map(time, kMapFreezerPitchTone);
-        }
-        if (clock_triggered)
-        {
-            freezer_clock_triggered_ = true;
-        }
-        break;
-
-    case Mode::REPLAYER:
-        SetDryWet(curve_map(dry_wet, kMapReplayerGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapReplayerGlobalFeedbackDelay);
-        feedback_delay_ /= curve_map(time, kMapReplayerGlobalFeedbackDelayMod);
-        feedback_volume_ = curve_map(feedback, kMapReplayerGlobalFeedbackVolume);
-        replayer_dry_wet_ = curve_map(dry_wet, kMapReplayerDryWet);
-        replayer_oversampling_ = curve_map(time, kMapReplayerOversampling);
-        replayer_stereo_oversampling_ = curve_map(stereo, kMapReplayerStereoOversampling);
-        delay_left_->SetOversampling(replayer_oversampling_ - replayer_stereo_oversampling_);
-        delay_right_->SetOversampling(replayer_oversampling_ + replayer_stereo_oversampling_);
-
-        if (time > kReplayerReverseThresholdUpper)
-        {
-            delay_left_->SetReverse(false);
-            delay_right_->SetReverse(false);
-        }
-        else if (time < kReplayerReverseThresholdLower)
-        {
-            delay_left_->SetReverse(true);
-            delay_right_->SetReverse(true);
-        }
-        if (dry_wet > kReplayerHoldThreshold)
-        {
-            replayer_hold_ = true;
-        }
-        else
-        {
-            replayer_hold_ = false;
-        }
-        break;
-
     case Mode::PITCHER:
         SetDryWet(curve_map(dry_wet, kMapPitcherGlobalDryWet));
         feedback_delay_ = curve_map(feedback, kMapPitcherGlobalFeedbackDelay);
@@ -877,50 +653,11 @@ void AppFxWizardPlus::UiLoop()
 
         break;
 
-    case Mode::SLICER:
-        SetDryWet(curve_map(dry_wet, kMapSlicerGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapSlicerGlobalFeedbackDelay);
-        feedback_volume_ = curve_map(feedback, kMapSlicerGlobalFeedbackVolume);
-        slicer_chance_ = curve_map(feedback, kMapSlicerChance);
-        slicer_stereo_ = curve_map(stereo, kMapSlicerStereo);
-        slicer_pattern_left_ = (step_map(time, kMapSlicerPattern) + slicer_stereo_) % (kMapSlicerPattern.size());
-        slicer_pattern_right_ = (((kMapSlicerPattern.size()) + step_map(time, kMapSlicerPattern)) - slicer_stereo_) % (kMapSlicerPattern.size());
-        slicer_decay_ = curve_map(dry_wet, kMapSlicerDecay);
-        slicer_env_left_.SetDecayTime(slicer_decay_);
-        slicer_env_right_.SetDecayTime(slicer_decay_);
-        // lfo used for tempo to allow multiplying the clock speed
-        lfo_left_.SetTicks((Kastle2::base.GetClock().GetTargetTicks() * buffer_size_ * 2) / 8);
-        if (clock_triggered)
-        {
-            slicer_clock_trigger = true;
-        }
-        break;
-
-    case Mode::SHIFTER:
-        SetDryWet(curve_map(dry_wet, kMapShifterGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapShifterGlobalFeedbackDelay);
-        feedback_volume_ = curve_map(feedback, kMapShifterGlobalFeedbackVolume);
-        shifter_dry_ = curve_map(time, kMapShifterTimeDry);
-        shifter_frequency_ = curve_map(time, kMapShifterFrequency, MapClamp::TRUE, MapSafe::TRUE);
-        shifter_env_mod_ = curve_map(time, kMapShifterEnvMod);
-        shifter_left_frequency_ = shifter_frequency_;
-        shifter_right_frequency_ = q31_add(shifter_frequency_, curve_map(stereo, kMapShifterStereoFrequency, MapClamp::TRUE, MapSafe::TRUE));
-        // change lfo shape
-        if (time > POT_HALF)
-        {
-            shifter_direction_ = true;
-        }
-        else
-        {
-            shifter_direction_ = false;
-        }
-        break;
-
     case Mode::REVERB:
     {
         SetDryWet(curve_map(dry_wet, kMapReverbGlobalDryWet));
         // the reverb has its own decay, so the global feedback is off
-        feedback_delay_ = kReverbFeedbackDelay;
+        feedback_delay_ = kNoFeedbackDelay;
         feedback_volume_ = Q15_ZERO;
         reverb_dry_ = curve_map(dry_wet, kMapReverbDry);
         reverb_wet_ = curve_map(dry_wet, kMapReverbWet);
@@ -953,11 +690,48 @@ void AppFxWizardPlus::UiLoop()
         chorus_.SetStereoPhase(static_cast<uint32_t>(curve_map(stereo, kMapChorusStereoPhase, MapClamp::TRUE)) << 17);
         break;
 
+    case Mode::PHASER:
+        SetDryWet(curve_map(dry_wet, kMapPhaserGlobalDryWet));
+        // the phaser has its own resonance, so the global feedback is off
+        feedback_delay_ = kNoFeedbackDelay;
+        feedback_volume_ = Q15_ZERO;
+        phaser_dry_ = curve_map(dry_wet, kMapPhaserDry);
+        phaser_wet_ = curve_map(dry_wet, kMapPhaserWet);
+        phaser_.SetRate(curve_map(time, kMapPhaserRate, MapClamp::TRUE));
+        phaser_.SetFeedback(curve_map(feedback, kMapPhaserFeedback, MapClamp::TRUE));
+        phaser_.SetStereoPhase(static_cast<uint32_t>(curve_map(stereo, kMapChorusStereoPhase, MapClamp::TRUE)) << 17);
+        break;
+
+    case Mode::PLATE:
+    {
+        SetDryWet(curve_map(dry_wet, kMapReverbGlobalDryWet));
+        feedback_delay_ = kNoFeedbackDelay;
+        feedback_volume_ = Q15_ZERO;
+        plate_dry_ = curve_map(dry_wet, kMapReverbDry);
+        plate_wet_ = curve_map(dry_wet, kMapReverbWet);
+        plate_.SetPreDelay(curve_map(stereo, kMapReverbPreDelay));
+
+        // same as the reverb: changing decay and damping is expensive, ignore small changes
+        float decay = curve_map(time, kMapReverbDecay);
+        if (decay > plate_decay_prev_ * 1.02f || decay < plate_decay_prev_ * 0.98f)
+        {
+            plate_decay_prev_ = decay;
+            plate_.SetDecay(decay);
+        }
+        int32_t damping = curve_map(feedback, kMapReverbDamping);
+        if (damping > plate_damping_prev_ + 150 || damping < plate_damping_prev_ - 150)
+        {
+            plate_damping_prev_ = damping;
+            plate_.SetDamping(damping);
+        }
+        break;
+    }
+
     case Mode::DISTORTION:
     {
         SetDryWet(curve_map(dry_wet, kMapDistortionGlobalDryWet));
         // feedback into a distortion is mostly noise, and the feedback knob is the tone control here
-        feedback_delay_ = kReverbFeedbackDelay;
+        feedback_delay_ = kNoFeedbackDelay;
         feedback_volume_ = Q15_ZERO;
         distortion_dry_ = curve_map(dry_wet, kMapDistortionDry);
         distortion_wet_ = curve_map(dry_wet, kMapDistortionWet);
@@ -971,36 +745,6 @@ void AppFxWizardPlus::UiLoop()
         distortion_right_.SetTone(tone);
         distortion_left_.SetBias(bias);
         distortion_right_.SetBias(bias);
-        break;
-    }
-
-    case Mode::PITCH_SHIFTER:
-    {
-        SetDryWet(curve_map(dry_wet, kMapPitchShifterGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapPitchShifterGlobalFeedbackDelay);
-        feedback_volume_ = curve_map(feedback, kMapPitchShifterGlobalFeedbackVolume);
-        pitch_shifter_dry_ = curve_map(dry_wet, kMapPitchShifterDry);
-        pitch_shifter_wet_ = curve_map(dry_wet, kMapPitchShifterWet);
-
-        // Time knob: +- kPitchShifterRangeSemitones, snapping to whole semitones near them
-        float semitones = (static_cast<float>(time) / static_cast<float>(POT_MAX) * 2.f - 1.f) * kPitchShifterRangeSemitones;
-        float nearest = static_cast<float>(static_cast<int32_t>(semitones + (semitones >= 0.f ? 0.5f : -0.5f)));
-        if (semitones - nearest < kPitchShifterDetentWidth && nearest - semitones < kPitchShifterDetentWidth)
-        {
-            semitones = nearest;
-        }
-        float detune = curve_map(stereo, kMapPitchShifterDetune, MapClamp::TRUE);
-
-        // Changing the pitch is expensive (floating point exp2), only do it when the knobs really moved:
-        // 1/16 semitone and 2 cent resolution
-        int32_t semitones_key = static_cast<int32_t>(semitones * 16.f + (semitones >= 0.f ? 0.5f : -0.5f));
-        int32_t detune_key = static_cast<int32_t>(detune * 0.5f);
-        if (semitones_key != pitch_shifter_semitones_key_ || detune_key != pitch_shifter_detune_key_)
-        {
-            pitch_shifter_semitones_key_ = semitones_key;
-            pitch_shifter_detune_key_ = detune_key;
-            pitch_shifter_.SetShift(semitones, detune);
-        }
         break;
     }
     }
@@ -1040,8 +784,8 @@ void AppFxWizardPlus::ModeInit()
 {
     mode_selector_.SendMidi();
 
-    // The reverb, chorus and pitch shifter use the memory of the long delay lines.
-    // When switching to anything else, wipe it so the stock modes don't play back what's left of them.
+    // The reverbs and the chorus use the memory of the long delay lines.
+    // When switching to anything else, wipe it so delay and pitcher don't play back what's left of them.
     if (delay_pool_dirty_ && !UsesDelayPool(mode_))
     {
         std::memset(delay_left_->GetBuffer(), 0, delay_left_->GetMaxLength() * sizeof(q15least_t));
@@ -1051,32 +795,11 @@ void AppFxWizardPlus::ModeInit()
 
     switch (mode_)
     {
-    case Mode::CRUSHER:
-        ModeCrusherInit();
-        break;
-    case Mode::FLANGER:
-        ModeFlangerInit();
-        break;
-    case Mode::PANNER:
-        ModePannerInit();
-        break;
-    case Mode::FREEZER:
-        ModeFreezerInit();
-        break;
-    case Mode::REPLAYER:
-        ModeReplayerInit();
-        break;
     case Mode::PITCHER:
         ModePitcherInit();
         break;
     case Mode::DELAY:
         ModeDelayInit();
-        break;
-    case Mode::SLICER:
-        ModeSlicerInit();
-        break;
-    case Mode::SHIFTER:
-        ModeShifterInit();
         break;
     case Mode::REVERB:
         ModeReverbInit();
@@ -1084,29 +807,24 @@ void AppFxWizardPlus::ModeInit()
     case Mode::CHORUS:
         ModeChorusInit();
         break;
+    case Mode::PHASER:
+        ModePhaserInit();
+        break;
+    case Mode::PLATE:
+        ModePlateInit();
+        break;
     case Mode::DISTORTION:
         ModeDistortionInit();
         break;
-    case Mode::PITCH_SHIFTER:
-        ModePitchShifterInit();
-        break;
     }
 
-    // reset oversampling and direction of the long delay
-    if (mode_ != Mode::REPLAYER)
-    {
-        delay_left_->SetOversampling(1 << 16);
-        delay_right_->SetOversampling(1 << 16);
-        delay_left_->SetReverse(false);
-        delay_right_->SetReverse(false);
-    }
-
-    // reset length of the long delay
-    if (mode_ != Mode::FREEZER)
-    {
-        delay_left_->SetLengthBothToMax();
-        delay_right_->SetLengthBothToMax();
-    }
+    // reset oversampling, direction and length of the long delay
+    delay_left_->SetOversampling(1 << 16);
+    delay_right_->SetOversampling(1 << 16);
+    delay_left_->SetReverse(false);
+    delay_right_->SetReverse(false);
+    delay_left_->SetLengthBothToMax();
+    delay_right_->SetLengthBothToMax();
 }
 
 void AppFxWizardPlus::ModeTrigger()
@@ -1115,15 +833,6 @@ void AppFxWizardPlus::ModeTrigger()
 
     switch (mode_)
     {
-    case Mode::FREEZER:
-        freezer_grab_buffer_ = true;
-        break;
-
-    case Mode::SLICER:
-        slicer_env_left_.Trigger();
-        slicer_env_right_.Trigger();
-        break;
-
     case Mode::DELAY:
         if (delay_ticks_time_ >= kDelayTicksSyncLowerLimit)
         {
@@ -1140,57 +849,18 @@ void AppFxWizardPlus::ModeTrigger()
         }
         break;
 
-    case Mode::REPLAYER:
-        delay_left_->StartRecordProgress();
-        replayer_filling_ = true;
-        break;
-
-    case Mode::SHIFTER:
-        shifter_env_.Trigger();
-        break;
-
     case Mode::CHORUS:
         chorus_.ResetPhase();
         break;
 
-    case Mode::REVERB:
-    case Mode::DISTORTION:
-    case Mode::PITCH_SHIFTER:
-        // nothing to trigger, the LEDs still blink
-        break;
-
-    case Mode::CRUSHER:
-        crusher_env_.Trigger();
-        break;
-
-    case Mode::PANNER:
-        // reset the LFOs to the next zero crossing
-        if (lfo_left_.GetPhase() > Q31_ZERO)
-        {
-            lfo_left_.Reset(Q31_MIN / 2);
-        }
-        else if (lfo_left_.GetPhase() < Q31_ZERO)
-        {
-            lfo_left_.Reset(Q31_MAX / 2);
-        }
-
-        if (lfo_right_.GetPhase() > Q31_ZERO)
-        {
-            lfo_right_.Reset(Q31_MIN / 2);
-        }
-        else if (lfo_right_.GetPhase() < Q31_ZERO)
-        {
-            lfo_right_.Reset(Q31_ZERO / 2);
-        }
-        break;
-
     case Mode::PITCHER:
         pitcher_env_.Trigger();
-        [[fallthrough]]; // purposelly keeping fallthrough
-
-    case Mode::FLANGER:
         lfo_left_.Reset();
         lfo_right_.Reset();
+        break;
+
+    default:
+        // nothing to trigger in the other modes, the LEDs still blink
         break;
     }
 }
@@ -1201,268 +871,18 @@ void AppFxWizardPlus::WorkLongDelay()
 
     switch (mode_)
     {
-    case Mode::FREEZER:
-    case Mode::REPLAYER:
     case Mode::DELAY:
-    case Mode::FLANGER:
     case Mode::PITCHER:
-    case Mode::SLICER:
-    case Mode::SHIFTER:
-    case Mode::REVERB:
+    // These use the memory of the long delay for their own purposes, it must not be written to
     case Mode::CHORUS:
-    case Mode::PITCH_SHIFTER:
+    case Mode::REVERB:
+    case Mode::PLATE:
         break;
 
     default:
         delay_left_->Write(input_left_);
         delay_right_->Write(input_right_);
     }
-}
-
-void AppFxWizardPlus::ModeCrusherInit()
-{
-    lfo_left_.SetWaveform(Oscillator::Waveform::RAMP);
-    lfo_right_.SetWaveform(Oscillator::Waveform::RAMP);
-}
-
-void AppFxWizardPlus::ModeCrusher()
-{
-    // xor for more digital feel
-    input_left_ ^= crusher_xor_;
-    input_right_ ^= crusher_xor_;
-
-    q15_t env = q15_mult(q31_to_q15(crusher_env_.Process()), crusher_env_mod_);
-    env = constrain(env, 1, 100);
-
-    lfo_left_.SetNativeFrequency(crusher_left_frequency_ / env);
-    lfo_right_.SetNativeFrequency(crusher_right_frequency_ / env);
-
-    q15_t lfo_l = q31_to_q15(lfo_left_.Process());
-    q15_t lfo_r = q15_mult(lfo_l, crusher_stereo_mix_) + q15_mult(q31_to_q15(lfo_right_.Process()), Q15_MAX - crusher_stereo_mix_);
-
-    if (lfo_l >= crusher_threshold_)
-    {
-        crusher_left_ = input_left_;
-    }
-
-    if (lfo_r >= crusher_threshold_)
-    {
-        crusher_right_ = input_right_;
-    }
-
-    output_left_ = crusher_left_;
-    output_right_ = crusher_right_;
-}
-
-void AppFxWizardPlus::ModeFlangerInit()
-{
-    lfo_left_.SetWaveform(Oscillator::Waveform::TRI);
-    lfo_right_.SetWaveform(Oscillator::Waveform::TRI);
-}
-
-void AppFxWizardPlus::ModeFlanger()
-{
-    delay_left_->Write(input_left_);
-    delay_right_->Write(input_right_);
-
-    q15_t lfo_l = q31_to_q15(lfo_left_.Process());
-    q15_t lfo_r = q15_mult(lfo_l, flanger_stereo_mix_smooth_) + q15_mult(q31_to_q15(lfo_right_.Process()), Q15_MAX - flanger_stereo_mix_smooth_);
-
-    // smooth out the stereo_mix
-    if ((flanger_mix_timeout_ > 1000) || (q15_abs(lfo_r - lfo_l) < q15(0.2f)))
-    {
-        flanger_mix_timeout_ = 0;
-        flanger_stereo_mix_smooth_ = flanger_stereo_mix_;
-    }
-    flanger_mix_timeout_++;
-
-    // scale from nothing to divided by 32 (I know it's hard to understand)
-    delay_left_->SetDelaySnap(511 + q15_mult(lfo_l, flanger_depth_ / 64));
-    delay_right_->SetDelaySnap(511 + q15_mult(lfo_r, flanger_depth_ / 64));
-
-    output_left_ = q15_mult(input_left_, Q15_MAX - flanger_dry_wet_) + q15_mult(delay_left_->Read(), flanger_dry_wet_);
-    output_right_ = q15_mult(input_right_, Q15_MAX - flanger_dry_wet_) + q15_mult(delay_right_->Read(), flanger_dry_wet_);
-}
-
-void AppFxWizardPlus::ModePannerInit()
-{
-    lfo_left_.SetWaveform(Oscillator::Waveform::SINE);
-    lfo_right_.SetWaveform(Oscillator::Waveform::SINE);
-}
-
-void AppFxWizardPlus::ModePanner()
-{
-    // change it to 0 to 1 waveform in q15
-    q15_t lfo_l = q31_to_q15(lfo_left_.Process());
-    q15_t lfo_r = q15_mult(lfo_l, panner_stereo_mix_) + q15_mult(q31_to_q15(lfo_right_.Process()), Q15_MAX - panner_stereo_mix_);
-    lfo_l = q15_add(q15_mult(panner_clip_.Process(lfo_l), Q15_HALF), Q15_HALF);
-    lfo_r = q15_add(q15_mult(panner_clip_.Process(lfo_r), Q15_HALF), Q15_HALF);
-    q15_t left_mod = q15_sub(Q15_MAX, q15_mult(lfo_l, panner_depth_));
-    q15_t right_mod = q15_sub(Q15_MAX, q15_mult(q15_sub(Q15_MAX, lfo_r), panner_depth_));
-
-    output_left_ = q15_mult(input_left_, left_mod);
-    output_right_ = q15_mult(input_right_, right_mod);
-}
-
-void AppFxWizardPlus::ModeFreezerInit()
-{
-    freezer_grab_buffer_ = false;
-    freezer_grab_prev_ = freezer_grab_buffer_;
-    delay_left_->SetOversampling(AdvancedDynamicDelayLine<q15least_t>::kDefaultSampling);
-    delay_right_->SetOversampling(AdvancedDynamicDelayLine<q15least_t>::kDefaultSampling);
-    delay_left_->SetDelaySnap(0);
-    delay_right_->SetDelaySnap(0);
-}
-
-void AppFxWizardPlus::ModeFreezer()
-{
-    bool can_use_feedback = true;
-    // something was changing this on boot even after the init ran (We should look into this)
-    delay_left_->SetDelaySnap(0);
-    delay_right_->SetDelaySnap(0);
-
-    if (freezer_grab_buffer_ != freezer_grab_prev_ && freezer_grab_buffer_)
-    {
-        freezer_grab_cnt_ = 0;
-        freezer_grab_buffer_ = false;
-        can_use_feedback = false;
-        // align buffers (if they were detuned with stereo pot)
-        delay_left_->SyncReadPointer();
-        delay_right_->SyncReadPointer();
-        delay_left_->SetLengthBoth(1);
-        delay_right_->SetLengthBoth(1);
-    }
-    freezer_grab_prev_ = freezer_grab_buffer_;
-
-    // fill buffer (I'm assuming both buffers are the same size because they are)
-    // please don't murder me for this else if tree :(     (I hate it too)
-    // only other way I can think of doing this is by reacting to changes of flags (too complex)
-    if (freezer_grab_continuous_) // drywet pot is at 0
-    {
-        if (freezer_grab_continuous_ != freezer_grab_continuous_prev_)
-        {
-            // align buffers (if they were detuned with stereo pot)
-            delay_left_->SyncReadPointer();
-            delay_right_->SyncReadPointer();
-            delay_left_->SetLengthBoth(1);
-            delay_right_->SetLengthBoth(1);
-        }
-        delay_left_->Write(input_left_);
-        delay_right_->Write(input_right_);
-        // record to the whole buffer
-        delay_left_->SetLengthBoth(freezer_record_length_);
-        delay_right_->SetLengthBoth(freezer_record_length_);
-        freezer_grab_cnt_ = freezer_record_length_;
-        freezer_wait_for_clock_ = true;
-        can_use_feedback = false;
-    }
-    else
-    {
-        if (freezer_wait_for_clock_ && !freezer_clock_triggered_)
-        // drywet is above 0, we're waiting for a clock trigger to make the loop end on a beat
-        {
-            delay_left_->Write(input_left_);
-            delay_right_->Write(input_right_);
-            // record to the whole buffer
-            delay_left_->SetLengthWrite(freezer_record_length_);
-            delay_right_->SetLengthWrite(freezer_record_length_);
-            freezer_grab_cnt_ = freezer_record_length_;
-            can_use_feedback = false;
-        }
-        else if (freezer_grab_cnt_ < freezer_record_length_)
-        // drywet is above 0 but we're filling the buffer completely (probably because of a trigger)
-        {
-            delay_left_->Write(input_left_);
-            delay_right_->Write(input_right_);
-            // record to the whole buffer
-            delay_left_->SetLengthWrite(freezer_record_length_);
-            delay_right_->SetLengthWrite(freezer_record_length_);
-            freezer_grab_cnt_++;
-            can_use_feedback = false;
-        }
-
-        // playback
-        if (can_use_feedback)
-        {
-            delay_left_->SetLengthBoth(freezer_length_left_);
-            delay_right_->SetLengthBoth(freezer_length_right_);
-            // keep both pointers in sync
-            delay_left_->SyncReadPointer();
-            delay_right_->SyncReadPointer();
-
-            // now that the pointers are synced, we can record in feedback
-            q31_t tmp = q15_mult(delay_left_->Read(), freezer_feedback_dry);
-            tmp += q15_mult(input_left_, freezer_feedback_);
-            tmp = q15_saturate(tmp);
-            delay_left_->Write(tmp);
-
-            tmp = q15_mult(delay_right_->Read(), freezer_feedback_dry);
-            tmp += q15_mult(input_right_, freezer_feedback_);
-            tmp = q15_saturate(tmp);
-            delay_right_->Write(tmp);
-        }
-        else
-        {
-            // set only the playback length because it's getting filled up
-            delay_left_->SetLengthRead(freezer_length_left_);
-            delay_right_->SetLengthRead(freezer_length_right_);
-        }
-
-        freezer_wait_for_clock_ = false;
-    }
-
-    freezer_clock_triggered_ = false;
-    freezer_grab_continuous_prev_ = freezer_grab_continuous_;
-
-    output_left_ = delay_left_->Read();
-    output_right_ = delay_right_->Read();
-}
-
-void AppFxWizardPlus::ModeReplayerInit()
-{
-    delay_left_->SetLengthBothToMax();
-    delay_right_->SetLengthBothToMax();
-    delay_left_->SetDelay(50800);
-    delay_right_->SetDelay(50800);
-}
-
-void AppFxWizardPlus::ModeReplayer()
-{
-    q15_t delay_reading_l;
-    q15_t delay_reading_r;
-
-    // fill the buffer fully at 1x oversampling and normal direction
-    if (delay_left_->GetRecordProgress() < delay_left_->GetMaxLength() && replayer_filling_)
-    {
-        delay_left_->SetReverse(false);
-        delay_right_->SetReverse(false);
-        delay_left_->Write(input_left_);
-        delay_right_->Write(input_right_);
-        delay_reading_l = input_left_;
-        delay_reading_r = input_right_;
-    }
-    else
-    {
-        replayer_filling_ = false;
-        // if the drywet is fully wet, do not update the buffer at all (lossless looping)
-        if (replayer_hold_)
-        {
-            delay_left_->WriteEmpty();
-            delay_right_->WriteEmpty();
-            delay_reading_l = delay_left_->Read();
-            delay_reading_r = delay_right_->Read();
-        }
-        else
-        {
-            delay_reading_l = delay_left_->Read();
-            delay_reading_r = delay_right_->Read();
-            delay_left_->Write(q15_mult(input_left_, Q15_MAX - replayer_dry_wet_) + q15_mult(delay_reading_l, replayer_dry_wet_));
-            delay_right_->Write(q15_mult(input_right_, Q15_MAX - replayer_dry_wet_) + q15_mult(delay_reading_r, replayer_dry_wet_));
-        }
-    }
-
-    output_left_ = delay_reading_l;
-    output_right_ = delay_reading_r;
 }
 
 void AppFxWizardPlus::ModePitcherInit()
@@ -1538,93 +958,6 @@ void AppFxWizardPlus::ModePitcher()
     output_right_ = q15_mult(input_right_, Q15_MAX - pitcher_dry_wet_) + q15_mult(right, pitcher_dry_wet_);
 }
 
-void AppFxWizardPlus::ModeShifterInit()
-{
-    // nothing to init
-}
-
-void AppFxWizardPlus::ModeShifter()
-{
-    if (sample_being_processed_ == 0)
-    {
-        q15_t env = q15_mult(q31_to_q15(shifter_env_.Process()), shifter_env_mod_);
-        env = constrain(env, 1, 100);
-        int64_t lf = (int64_t)shifter_left_frequency_ * (int64_t)env;
-        int64_t rf = (int64_t)shifter_right_frequency_ * (int64_t)env;
-        lfo_left_.SetNativeFrequency(q31_saturate(lf));
-        lfo_right_.SetNativeFrequency(q31_saturate(rf));
-    }
-
-    if (shifter_direction_)
-    {
-        lfo_left_.SetWaveform(Oscillator::Waveform::SAW);
-        lfo_right_.SetWaveform(Oscillator::Waveform::SAW);
-    }
-    else
-    {
-        lfo_left_.SetWaveform(Oscillator::Waveform::RAMP);
-        lfo_right_.SetWaveform(Oscillator::Waveform::RAMP);
-    }
-
-    delay_left_->Write(input_left_);
-    delay_right_->Write(input_right_);
-
-    // scale lfo to +-255
-    q15_t lfo_l = 255 + (q31_to_q15(lfo_left_.Process()) / 128);
-    q15_t lfo_r = 255 + (q31_to_q15(lfo_right_.Process()) / 128);
-
-    // lfo_l = q15_mult(lfo_l, Q15_MAX - shifter_dry_);
-    // lfo_r = q15_mult(lfo_r, Q15_MAX - shifter_dry_);
-
-    /*if (shifter_direction_ == 0)
-    {
-        lfo_l = 0;
-        lfo_r = 0;
-    }*/
-
-    delay_left_->SetDelaySnap(lfo_l);
-    delay_right_->SetDelaySnap(lfo_r);
-
-    int32_t left = delay_left_->Read();
-    int32_t right = delay_right_->Read();
-
-    // fade the volume near the lfo phase reset to remove clicks - left channel
-    int32_t remaining_ticks = lfo_left_.GetTicks() - lfo_left_.GetElapsedTicks();
-    if (remaining_ticks < 0)
-    {
-        remaining_ticks = 0;
-    }
-    size_t elapsed_ticks = lfo_left_.GetElapsedTicks();
-    if (elapsed_ticks < 64)
-    {
-        left = q15_mult(left, elapsed_ticks << (15 - 6));
-    }
-    else if (remaining_ticks < 64)
-    {
-        left = q15_mult(left, remaining_ticks << (15 - 6));
-    }
-    // fade the volume near the lfo phase reset to remove clicks - right channel
-    remaining_ticks = lfo_right_.GetTicks() - lfo_right_.GetElapsedTicks();
-    if (remaining_ticks < 0)
-    {
-        remaining_ticks = 0;
-    }
-    elapsed_ticks = lfo_right_.GetElapsedTicks();
-    if (elapsed_ticks < 64)
-    {
-        right = q15_mult(right, elapsed_ticks << (15 - 6));
-    }
-    else if (remaining_ticks < 64)
-    {
-        right = q15_mult(right, remaining_ticks << (15 - 6));
-    }
-
-    output_left_ = q15_mult(input_left_, shifter_dry_) + q15_mult(left, Q15_MAX - shifter_dry_);
-    output_right_ = q15_mult(input_right_, shifter_dry_) + q15_mult(right, Q15_MAX - shifter_dry_);
-    // output_left_ = left;
-    // output_right_ = right;
-}
-
 void AppFxWizardPlus::ModeDelayInit()
 {
     delay_clip_.SetDrive(120);
@@ -1676,49 +1009,6 @@ void AppFxWizardPlus::ModeDelay()
     // might need a compressor at the end here too, I'm not sure
 }
 
-void AppFxWizardPlus::ModeSlicerInit()
-{
-    lfo_left_.SetWaveform(Oscillator::Waveform::SQUARE);
-}
-
-void AppFxWizardPlus::ModeSlicer()
-{
-    // use lfo for clocking instead of the clock itself so we can multiply the timing
-    bool tmp_lfo = lfo_left_.Process() > Q15_ZERO;
-    if (tmp_lfo != slicer_lfo_prev_ && tmp_lfo)
-    {
-        if (slicer_chance_ > rand() % Q15_MAX)
-        {
-            slicer_flip_bit_ = true;
-        }
-        else
-        {
-            slicer_flip_bit_ = false;
-        }
-
-        slicer_step_ = (slicer_step_ + 1) % kSlicerPatterns.size();
-        if (((kSlicerPatterns[slicer_pattern_left_] & (1 << slicer_step_)) >> slicer_step_) ^ slicer_flip_bit_)
-        {
-            slicer_env_left_.Trigger();
-        }
-        if (((kSlicerPatterns[slicer_pattern_right_] & (1 << slicer_step_)) >> slicer_step_) ^ slicer_flip_bit_)
-        {
-            slicer_env_right_.Trigger();
-        }
-    }
-    slicer_lfo_prev_ = tmp_lfo;
-
-    // sync lfo to the clock
-    if (slicer_clock_trigger)
-    {
-        slicer_clock_trigger = false;
-        lfo_left_.Reset();
-    }
-
-    output_left_ = q15_mult(input_left_, q31_to_q15(slicer_env_left_.Process()));
-    output_right_ = q15_mult(input_right_, q31_to_q15(slicer_env_right_.Process()));
-}
-
 void AppFxWizardPlus::ModeReverbInit()
 {
     delay_pool_dirty_ = true;
@@ -1743,6 +1033,45 @@ void AppFxWizardPlus::ModeReverb()
 
     output_left_ = q15_add(q15_mult(input_left_, reverb_dry_), q15_mult(wet_left, reverb_wet_));
     output_right_ = q15_add(q15_mult(input_right_, reverb_dry_), q15_mult(wet_right, reverb_wet_));
+}
+
+void AppFxWizardPlus::ModePhaserInit()
+{
+    phaser_.Reset();
+}
+
+void AppFxWizardPlus::ModePhaser()
+{
+    int32_t wet_left, wet_right;
+    phaser_.Process(input_left_, input_right_, wet_left, wet_right);
+
+    output_left_ = q15_add(q15_mult(input_left_, phaser_dry_), q15_mult(wet_left, phaser_wet_));
+    output_right_ = q15_add(q15_mult(input_right_, phaser_dry_), q15_mult(wet_right, phaser_wet_));
+}
+
+void AppFxWizardPlus::ModePlateInit()
+{
+    delay_pool_dirty_ = true;
+    plate_.Clear();
+    plate_decay_prev_ = -1.f;
+    plate_damping_prev_ = -100000;
+    plate_ready_ = true;
+}
+
+void AppFxWizardPlus::ModePlate()
+{
+    if (!plate_ready_)
+    {
+        output_left_ = input_left_;
+        output_right_ = input_right_;
+        return;
+    }
+
+    int32_t wet_left, wet_right;
+    plate_.Process(input_left_, input_right_, wet_left, wet_right);
+
+    output_left_ = q15_add(q15_mult(input_left_, plate_dry_), q15_mult(wet_left, plate_wet_));
+    output_right_ = q15_add(q15_mult(input_right_, plate_dry_), q15_mult(wet_right, plate_wet_));
 }
 
 void AppFxWizardPlus::ModeChorusInit()
@@ -1781,32 +1110,6 @@ void AppFxWizardPlus::ModeDistortion()
 
     output_left_ = q15_add(q15_mult(input_left_, distortion_dry_), q15_mult(wet_left, distortion_wet_));
     output_right_ = q15_add(q15_mult(input_right_, distortion_dry_), q15_mult(wet_right, distortion_wet_));
-}
-
-void AppFxWizardPlus::ModePitchShifterInit()
-{
-    delay_pool_dirty_ = true;
-    pitch_shifter_.Clear();
-    // make UiLoop send the pitch again
-    pitch_shifter_semitones_key_ = INT32_MIN;
-    pitch_shifter_detune_key_ = INT32_MIN;
-    pitch_shifter_ready_ = true;
-}
-
-void AppFxWizardPlus::ModePitchShifter()
-{
-    if (!pitch_shifter_ready_)
-    {
-        output_left_ = input_left_;
-        output_right_ = input_right_;
-        return;
-    }
-
-    int32_t wet_left, wet_right;
-    pitch_shifter_.Process(input_left_, input_right_, wet_left, wet_right);
-
-    output_left_ = q15_add(q15_mult(input_left_, pitch_shifter_dry_), q15_mult(wet_left, pitch_shifter_wet_));
-    output_right_ = q15_add(q15_mult(input_right_, pitch_shifter_dry_), q15_mult(wet_right, pitch_shifter_wet_));
 }
 
 void AppFxWizardPlus::MemoryInitialization()

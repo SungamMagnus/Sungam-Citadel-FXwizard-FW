@@ -59,11 +59,11 @@ namespace kastle2
 /**
  * @class AppFxWizardPlus
  * @ingroup apps
- * @brief FX Wizard with four extra effects: reverb, chorus, distortion and pitch shifter.
- *        Based on the Bastl Instruments FX Wizard (Marek Mach, Vaclav Mach, 2024).
+ * @brief FX Wizard variant with seven effects: delay, chorus, phaser, reverb (hall), reverb (plate),
+ *        distortion and pitcher. Based on the Bastl Instruments FX Wizard (Marek Mach, Vaclav Mach, 2024).
  *
- * The first nine modes are exactly the stock FX Wizard modes, the new ones are appended after them,
- * so the stock modes keep their positions. See ExtraEffects.hpp for the DSP.
+ * Delay and Pitcher are the stock FX Wizard modes, the others are new, see ExtraEffects.hpp for their DSP.
+ * The stock Flanger, Freezer, Panner, Crusher, Slicer, Replayer and Shifter were removed.
  */
 
 class AppFxWizardPlus : public virtual App
@@ -75,19 +75,13 @@ public:
      */
     enum class Mode
     {
-        DELAY,    // GREEN
-        FLANGER,  // CYAN
-        FREEZER,  // BLUE
-        PANNER,   // WHITE
-        CRUSHER,  // YELLOW
-        SLICER,   // LIGHT_GREEN
-        PITCHER,  // RASPBERRY
-        REPLAYER, // ORANGE
-        SHIFTER,  // LIGHT PINK
-        REVERB,        // PURPLE
-        CHORUS,        // AQUAMARINE
-        DISTORTION,    // RED
-        PITCH_SHIFTER, // INDIGO
+        DELAY,      // GREEN
+        CHORUS,     // CYAN
+        PHASER,     // ORANGE
+        REVERB,     // PURPLE, comb based hall / room
+        PLATE,      // BLUE, Dattorro plate
+        DISTORTION, // YELLOW
+        PITCHER,    // RASPBERRY
         COUNT,
     };
 
@@ -97,22 +91,16 @@ public:
     static inline const EnumArray<Mode, uint32_t> kLedColors = {
         WS2812::GREEN,
         WS2812::CYAN,
-        WS2812::BLUE,
-        WS2812::WHITE,
-        WS2812::YELLOW,
-        WS2812::LIGHT_GREEN,
-        WS2812::RASPBERRY,
         WS2812::ORANGE,
-        WS2812::LIGHT_PINK,
         WS2812::PURPLE,
-        WS2812::AQUAMARINE,
-        WS2812::RED,
-        WS2812::INDIGO,
+        WS2812::BLUE,
+        WS2812::YELLOW,
+        WS2812::RASPBERRY,
     };
 
     /**
      * @brief App ID stored in the EEPROM. Different from the stock FX Wizard (0xB1), so the two firmwares
-     *        never read each other's settings (the stock one doesn't know the extra modes).
+     *        never read each other's settings (the mode list is different).
      *        Picked from the community range, see APP_LIST.md.
      */
     static constexpr uint8_t kAppId = 0x7F;
@@ -241,58 +229,6 @@ private:
     q15_t global_dry_wet_ = Q15_ZERO;
     q15_t global_dry_wet_queue_ = Q15_ZERO;
 
-    // crusher
-    q15_t crusher_threshold_ = Q15_ZERO;
-    q15_t crusher_left_ = Q15_ZERO;
-    q15_t crusher_right_ = Q15_ZERO;
-    q31_t crusher_frequency_ = Q31_ZERO;
-    q15_t crusher_stereo_mix_ = Q15_ZERO;
-    q15_t crusher_env_mod_ = Q15_ZERO;
-    AdsrEnv crusher_env_;
-    q31_t crusher_left_frequency_ = Q31_ZERO;
-    q31_t crusher_right_frequency_ = Q31_ZERO;
-    int16_t crusher_xor_ = 0;
-
-    // flanger
-    q15_t flanger_depth_ = Q15_ZERO;
-    q15_t flanger_dry_wet_ = Q15_ZERO;
-    q31_t flanger_frequency_ = Q31_ZERO;
-    q15_t flanger_stereo_mix_ = Q15_ZERO;
-    q15_t flanger_stereo_mix_smooth_ = Q15_ZERO;
-    size_t flanger_mix_timeout_ = 0;
-
-    // panner
-    q15_t panner_depth_ = Q15_ZERO;
-    SoftClipper panner_clip_;
-    q31_t panner_frequency_ = Q31_ZERO;
-    q15_t panner_stereo_mix_ = Q15_ZERO;
-    q31_t panner_stereo_left_ = Q31_ZERO;
-    q31_t panner_stereo_right_ = Q31_ZERO;
-
-    // freezer
-    size_t freezer_length_left_ = 0;
-    size_t freezer_length_right_ = 0;
-    bool freezer_grab_continuous_ = false;
-    bool freezer_grab_continuous_prev_ = false;
-    bool freezer_grab_buffer_ = false;
-    bool freezer_grab_prev_ = false;
-    size_t freezer_grab_cnt_ = 0;
-    bool freezer_clock_triggered_ = false;
-    bool freezer_wait_for_clock_ = false;
-    q15_t freezer_feedback_ = Q15_ZERO;
-    q15_t freezer_feedback_dry = Q15_ZERO;
-    size_t freezer_record_length_ = 0;
-    bool freezer_can_use_feedback_prev_ = false;
-    size_t freezer_start_ptr_left_ = 0;
-    size_t freezer_start_ptr_right_ = 0;
-
-    // replayer
-    q15_t replayer_dry_wet_ = Q15_ZERO;
-    size_t replayer_oversampling_ = 0;
-    bool replayer_hold_ = false;
-    size_t replayer_stereo_oversampling_ = 0;
-    bool replayer_filling_ = false;
-
     // pitcher
     q31_t pitcher_frequency_ = 0.f;
     q15_t pitcher_dry_wet_ = Q15_ZERO;
@@ -301,15 +237,6 @@ private:
     AdsrEnv pitcher_env_;
     q15_t pitcher_env_depth_ = Q15_ZERO;
     q15_t pitcher_depth_modulated_ = Q15_ZERO;
-
-    // shifter
-    bool shifter_direction_ = 0;
-    q15_t shifter_dry_ = Q15_ZERO;
-    q31_t shifter_frequency_ = 0.f;
-    q31_t shifter_left_frequency_ = Q31_ZERO;
-    q31_t shifter_right_frequency_ = Q31_ZERO;
-    AdsrEnv shifter_env_;
-    q15_t shifter_env_mod_ = Q15_ZERO;
 
     // delay
     q15_t delay_wet_ = Q15_ZERO;
@@ -332,19 +259,6 @@ private:
     size_t delay_time_left_prev_ = 0;
     size_t delay_time_right_prev_ = 0;
 
-    // slicer
-    size_t slicer_pattern_left_ = 0;
-    size_t slicer_pattern_right_ = 0;
-    size_t slicer_step_ = 0;
-    AdsrEnv slicer_env_left_;
-    AdsrEnv slicer_env_right_;
-    bool slicer_clock_trigger = false;
-    float slicer_decay_ = 0.f;
-    bool slicer_lfo_prev_ = false;
-    int32_t slicer_stereo_ = 0;
-    uint16_t slicer_chance_ = 0;
-    bool slicer_flip_bit_ = false;
-
     // --- extra effects (see ExtraEffects.hpp) ---
     // They work in the memory of the long delay lines (delay_left_ / delay_right_), which is otherwise unused
     // while one of these modes is active. There is no RAM to spare for separate buffers.
@@ -355,6 +269,18 @@ private:
     q15_t reverb_wet_ = Q15_ZERO;
     float reverb_decay_prev_ = -1.f;
     int32_t reverb_damping_prev_ = -1;
+
+    // plate reverb
+    fxplus::PlateReverb plate_;
+    q15_t plate_dry_ = Q15_MAX;
+    q15_t plate_wet_ = Q15_ZERO;
+    float plate_decay_prev_ = -1.f;
+    int32_t plate_damping_prev_ = -1;
+
+    // phaser
+    fxplus::Phaser phaser_;
+    q15_t phaser_dry_ = Q15_MAX;
+    q15_t phaser_wet_ = Q15_ZERO;
 
     // chorus
     fxplus::Chorus chorus_;
@@ -367,13 +293,6 @@ private:
     q15_t distortion_dry_ = Q15_ZERO;
     q15_t distortion_wet_ = Q15_MAX;
 
-    // pitch shifter
-    fxplus::PitchShifter pitch_shifter_;
-    q15_t pitch_shifter_dry_ = Q15_ZERO;
-    q15_t pitch_shifter_wet_ = Q15_MAX;
-    int32_t pitch_shifter_semitones_key_ = INT32_MIN; // knob position in 1/16 semitones, for detecting changes
-    int32_t pitch_shifter_detune_key_ = INT32_MIN;
-
     /**
      * @brief The effects that use the delay memory may only run once their Mode*Init() has wiped it.
      *        UiLoop changes mode_ first and runs ModeInit() afterwards, and the audio loop can interrupt in between.
@@ -382,7 +301,7 @@ private:
      */
     volatile bool reverb_ready_ = false;
     volatile bool chorus_ready_ = false;
-    volatile bool pitch_shifter_ready_ = false;
+    volatile bool plate_ready_ = false;
 
     /**
      * @brief True while the long delay lines contain data of the extra effects (not audio for the stock modes).
@@ -395,7 +314,7 @@ private:
      */
     static constexpr bool UsesDelayPool(Mode mode)
     {
-        return mode == Mode::REVERB || mode == Mode::CHORUS || mode == Mode::PITCH_SHIFTER;
+        return mode == Mode::REVERB || mode == Mode::PLATE || mode == Mode::CHORUS;
     }
 
     std::unique_ptr<AdvancedDynamicDelayLine<q15least_t>> feedback_delay_left_;
@@ -416,32 +335,20 @@ private:
     void ModeTrigger();
     void WorkLongDelay();
 
-    void ModeCrusherInit();
-    void ModeCrusher();
-    void ModeFlangerInit();
-    void ModeFlanger();
-    void ModePannerInit();
-    void ModePanner();
-    void ModeFreezerInit();
-    void ModeFreezer();
-    void ModeReplayerInit();
-    void ModeReplayer();
     void ModePitcherInit();
     void ModePitcher();
-    void ModeSlicerInit();
-    void ModeSlicer();
-    void ModeShifterInit();
-    void ModeShifter();
     void ModeDelayInit();
     void ModeDelay();
     void ModeReverbInit();
     void ModeReverb();
+    void ModePlateInit();
+    void ModePlate();
+    void ModePhaserInit();
+    void ModePhaser();
     void ModeChorusInit();
     void ModeChorus();
     void ModeDistortionInit();
     void ModeDistortion();
-    void ModePitchShifterInit();
-    void ModePitchShifter();
 
     /**
      * @brief Here the second core processes the audio. It is called by the SecondCoreWorker.

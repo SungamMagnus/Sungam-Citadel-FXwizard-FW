@@ -663,6 +663,457 @@ private:
 };
 
 /* ------------------------------------------------------------------------------------------------
+ *  PHASER
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * @brief First order all-pass coefficients for a sweep of the break frequency from 100 Hz to 6.4 kHz
+ *        (exponential, 65 points). a = (tan(pi f / fs) - 1) / (tan(pi f / fs) + 1), q15 (negative for low frequencies).
+ */
+static constexpr int16_t kPhaserCoefficients[65] = {
+    -32303, -32272, -32239, -32204, -32167, -32127, -32084, -32039, -31990, -31939, -31884, -31825, -31763,
+    -31697, -31626, -31551, -31471, -31385, -31294, -31198, -31095, -30986, -30869, -30746, -30614, -30475,
+    -30326, -30169, -30002, -29824, -29635, -29435, -29223, -28998, -28760, -28508, -28240, -27958, -27659,
+    -27342, -27008, -26655, -26282, -25889, -25474, -25038, -24577, -24093, -23584, -23048, -22486, -21896,
+    -21276, -20627, -19946, -19234, -18488, -17708, -16892, -16040, -15149, -14218, -13245, -12229, -11167
+};
+
+/**
+ * @class Phaser
+ * @brief Six stage all-pass phaser with feedback and a stereo LFO offset. Needs no buffers.
+ *
+ * The output is the all-pass chain only (100% wet, same level as the input); mix it with the dry signal 1:1
+ * to get the notches. The sweep covers 10% - 90% of the coefficient table, about 150 Hz to 4.2 kHz.
+ */
+class Phaser
+{
+public:
+    static constexpr int kStages = 6;
+
+    void Reset()
+    {
+        for (auto &c : channel_)
+        {
+            for (int i = 0; i < kStages; i++)
+            {
+                c.x1[i] = 0;
+                c.y1[i] = 0;
+            }
+            c.last = 0;
+        }
+        phase_ = 0;
+    }
+
+    /** @brief LFO rate in Hz, call from the UI loop only (floating point). */
+    void SetRate(float hz)
+    {
+        inc_ = static_cast<uint32_t>(hz / 44000.f * 4294967296.f);
+    }
+
+    /** @brief Feedback (resonance), q15. Limited to 0.85, which keeps the loop stable. */
+    void SetFeedback(int32_t q15)
+    {
+        feedback_ = q15 < 0 ? 0 : (q15 > 27853 ? 27853 : q15);
+    }
+
+    /** @brief Phase offset of the right LFO as a 32-bit phase (0x80000000 = opposite). */
+    void SetStereoPhase(uint32_t phase_offset)
+    {
+        stereo_phase_ = phase_offset;
+    }
+
+    inline void Process(int32_t in_l, int32_t in_r, int32_t &out_l, int32_t &out_r)
+    {
+        out_l = Run(channel_[0], phase_, in_l);
+        out_r = Run(channel_[1], phase_ + stereo_phase_, in_r);
+        phase_ += inc_;
+    }
+
+private:
+    struct Channel
+    {
+        int32_t x1[kStages] = {0};
+        int32_t y1[kStages] = {0};
+        int32_t last = 0;
+    };
+
+    inline int32_t Run(Channel &c, uint32_t phase, int32_t in)
+    {
+        // all-pass coefficient for this moment of the sweep (same for all stages)
+        int32_t pos = 16384 + ((LfoSine(phase) * 13107) >> 15); // 0.5 +- 0.4, q15
+        int32_t idx = pos >> 9;
+        int32_t frac = pos & 511;
+        int32_t a = kPhaserCoefficients[idx] + (((kPhaserCoefficients[idx + 1] - kPhaserCoefficients[idx]) * frac) >> 9);
+
+        int32_t x = Sat16(in + ((c.last * feedback_ + 0x4000) >> 15));
+        for (int s = 0; s < kStages; s++)
+        {
+            // y[n] = a * (x[n] - y[n-1]) + x[n-1]
+            int32_t y = Sat16(((a * (x - c.y1[s]) + 0x4000) >> 15) + c.x1[s]);
+            c.x1[s] = x;
+            c.y1[s] = y;
+            x = y;
+        }
+        c.last = x;
+        return x;
+    }
+
+    Channel channel_[2];
+    uint32_t phase_ = 0;
+    uint32_t inc_ = 0;
+    uint32_t stereo_phase_ = 0;
+    int32_t feedback_ = 0;
+};
+
+/* ------------------------------------------------------------------------------------------------
+ *  PLATE REVERB
+ * ---------------------------------------------------------------------------------------------- */
+
+namespace plate_detail
+{
+// Jon Dattorro's plate reverb ("Effect Design Part 1", 1997), delay lengths scaled from his 29761 Hz to 44 kHz.
+constexpr int kInputAllpasses = 4;
+constexpr uint16_t kInputAllpassLen[kInputAllpasses] = {210, 158, 560, 410};
+constexpr int32_t kInputAllpassGain[kInputAllpasses] = {24576, 24576, 20480, 20480}; // 0.75 0.75 0.625 0.625
+
+constexpr uint16_t kExcursion = 24; // samples of modulation of the first tank all-pass
+
+constexpr uint16_t kLeftModLen = 994;
+constexpr uint16_t kLeftDelay1Len = 6584;
+constexpr uint16_t kLeftAllpass2Len = 2661;
+constexpr uint16_t kLeftDelay2Len = 5500;
+
+constexpr uint16_t kRightModLen = 1342;
+constexpr uint16_t kRightDelay1Len = 6235;
+constexpr uint16_t kRightAllpass2Len = 3927;
+constexpr uint16_t kRightDelay2Len = 4676;
+
+constexpr size_t kPreDelayWords = 4096; // power of two
+
+constexpr size_t kInputWords = 210 + 158 + 560 + 410;
+constexpr size_t kLeftWords = kPreDelayWords + kInputWords + (kLeftModLen + kExcursion + 2) + kLeftDelay1Len + kLeftAllpass2Len + kLeftDelay2Len;
+constexpr size_t kRightWords = (kRightModLen + kExcursion + 2) + kRightDelay1Len + kRightAllpass2Len + kRightDelay2Len;
+} // namespace plate_detail
+
+/**
+ * @class PlateReverb
+ * @brief Dattorro plate reverb: input diffusion, then two cross-coupled tanks with a modulated all-pass,
+ *        damping low-pass and decay in each. Dense and smooth, in contrast to the comb based Reverb.
+ *
+ * Needs kLeftWords / kRightWords int16 samples (about 21k and 16k).
+ * Decay and damping are set like on Reverb. Output is 100% wet.
+ */
+class PlateReverb
+{
+public:
+    static constexpr size_t kLeftWords = plate_detail::kLeftWords;
+    static constexpr size_t kRightWords = plate_detail::kRightWords;
+    static constexpr size_t kPreDelayWords = plate_detail::kPreDelayWords;
+
+    bool Init(int16_t *left_buffer, size_t left_words, int16_t *right_buffer, size_t right_words)
+    {
+        using namespace plate_detail;
+        if (left_buffer == nullptr || right_buffer == nullptr || left_words < kLeftWords || right_words < kRightWords)
+        {
+            ready_ = false;
+            return false;
+        }
+        int16_t *l = left_buffer;
+        predelay_ = l;
+        l += kPreDelayWords;
+        for (int i = 0; i < kInputAllpasses; i++)
+        {
+            input_ap_[i].Setup(l, kInputAllpassLen[i]);
+            l += kInputAllpassLen[i];
+        }
+        left_mod_.Setup(l, kLeftModLen, kLeftModLen + kExcursion + 2);
+        l += kLeftModLen + kExcursion + 2;
+        left_d1_.Setup(l, kLeftDelay1Len);
+        l += kLeftDelay1Len;
+        left_ap2_.Setup(l, kLeftAllpass2Len);
+        l += kLeftAllpass2Len;
+        left_d2_.Setup(l, kLeftDelay2Len);
+
+        int16_t *r = right_buffer;
+        right_mod_.Setup(r, kRightModLen, kRightModLen + kExcursion + 2);
+        r += kRightModLen + kExcursion + 2;
+        right_d1_.Setup(r, kRightDelay1Len);
+        r += kRightDelay1Len;
+        right_ap2_.Setup(r, kRightAllpass2Len);
+        r += kRightAllpass2Len;
+        right_d2_.Setup(r, kRightDelay2Len);
+
+        ready_ = true;
+        SetDecay(2.f);
+        SetDamping(32767);
+        SetPreDelay(0);
+        return true;
+    }
+
+    void Clear()
+    {
+        if (!ready_)
+        {
+            return;
+        }
+        std::memset(predelay_, 0, plate_detail::kPreDelayWords * sizeof(int16_t));
+        predelay_write_ = 0;
+        for (auto &a : input_ap_)
+        {
+            a.Clear();
+        }
+        left_mod_.Clear();
+        left_d1_.Clear();
+        left_ap2_.Clear();
+        left_d2_.Clear();
+        right_mod_.Clear();
+        right_d1_.Clear();
+        right_ap2_.Clear();
+        right_d2_.Clear();
+        lp_in_ = 0;
+        lp_left_ = 0;
+        lp_right_ = 0;
+        lfo_phase_ = 0;
+        lfo_phase_right_ = 0x40000000u;
+    }
+
+    /**
+     * @brief Decay time, RT60 in seconds (0.1 - 30). Floating point, UI loop only.
+     * @note The two tanks are in series, so one trip around takes kLoopSeconds and passes two decay stages.
+     */
+    void SetDecay(float rt60_seconds)
+    {
+        if (rt60_seconds < 0.1f)
+        {
+            rt60_seconds = 0.1f;
+        }
+        if (rt60_seconds > 30.f)
+        {
+            rt60_seconds = 30.f;
+        }
+        float decay = std::pow(10.f, -1.5f * kLoopSeconds / rt60_seconds);
+        if (decay > 0.985f)
+        {
+            decay = 0.985f;
+        }
+        decay_ = static_cast<int32_t>(decay * 32768.f);
+        input_gain_ = static_cast<int32_t>(kInputTrim * std::sqrt(1.f - decay * decay) * 32767.f);
+        // a long tail has more energy in total, but the damped, dark settings lose some of it
+    }
+
+    /** @brief Damping low-pass in the tanks, q15 coefficient: 32767 = bright, small = dark. */
+    void SetDamping(int32_t alpha)
+    {
+        damping_ = alpha < 200 ? 200 : (alpha > 32767 ? 32767 : alpha);
+    }
+
+    void SetPreDelay(size_t samples)
+    {
+        predelay_len_ = samples >= plate_detail::kPreDelayWords ? plate_detail::kPreDelayWords - 1 : samples;
+    }
+
+    inline void Process(int32_t in_l, int32_t in_r, int32_t &out_l, int32_t &out_r)
+    {
+        using namespace plate_detail;
+        if (!ready_)
+        {
+            out_l = 0;
+            out_r = 0;
+            return;
+        }
+
+        // mono sum -> pre-delay -> gain -> bandwidth low-pass -> four all-passes
+        predelay_[predelay_write_] = static_cast<int16_t>(Sat16((in_l + in_r) >> 1));
+        int32_t x = predelay_[(predelay_write_ - predelay_len_) & (kPreDelayWords - 1)];
+        predelay_write_ = (predelay_write_ + 1) & (kPreDelayWords - 1);
+        x = (x * input_gain_) >> 15;
+        lp_in_ += ((x - lp_in_) * 28000) >> 15; // about 0.85, takes the edge off
+        x = lp_in_;
+        for (int i = 0; i < kInputAllpasses; i++)
+        {
+            x = input_ap_[i].Process(x, kInputAllpassGain[i]);
+        }
+
+        // two slow LFOs for the modulated all-passes
+        int32_t mod_l = (static_cast<int32_t>(kExcursion) * LfoSine(lfo_phase_)) >> 7;
+        int32_t mod_r = (static_cast<int32_t>(kExcursion) * LfoSine(lfo_phase_right_)) >> 7;
+        lfo_phase_ += kLfoIncrementLeft;
+        lfo_phase_right_ += kLfoIncrementRight;
+
+        // outputs of the second delay of each tank, they feed the other tank
+        int32_t from_left = left_d2_.Read();
+        int32_t from_right = right_d2_.Read();
+
+        // left tank
+        int32_t t = Sat16(x + from_right);
+        t = left_mod_.Process(t, -22938, mod_l); // -0.7
+        int32_t d1 = left_d1_.Read();
+        left_d1_.Write(t);
+        rng_ ^= rng_ << 13;
+        rng_ ^= rng_ >> 17;
+        rng_ ^= rng_ << 5;
+        lp_left_ += ((d1 - lp_left_) * damping_ + static_cast<int32_t>(rng_ & 0x7FFF)) >> 15;
+        t = (lp_left_ * decay_ + static_cast<int32_t>((rng_ >> 15) & 0x7FFF)) >> 15;
+        t = left_ap2_.Process(t, 16384); // 0.5
+        left_d2_.Write(t);
+
+        // right tank
+        t = Sat16(x + from_left);
+        t = right_mod_.Process(t, -22938, mod_r);
+        d1 = right_d1_.Read();
+        right_d1_.Write(t);
+        rng_ ^= rng_ << 13;
+        rng_ ^= rng_ >> 17;
+        rng_ ^= rng_ << 5;
+        lp_right_ += ((d1 - lp_right_) * damping_ + static_cast<int32_t>(rng_ & 0x7FFF)) >> 15;
+        t = (lp_right_ * decay_ + static_cast<int32_t>((rng_ >> 15) & 0x7FFF)) >> 15;
+        t = right_ap2_.Process(t, 16384);
+        right_d2_.Write(t);
+
+        // output taps (Dattorro's table, scaled to 44 kHz)
+        int32_t yl = right_d1_.Tap(393) + right_d1_.Tap(4397) - right_ap2_.Tap(2828) + right_d2_.Tap(2951) -
+                     left_d1_.Tap(2942) - left_ap2_.Tap(276) - left_d2_.Tap(1576);
+        int32_t yr = left_d1_.Tap(522) + left_d1_.Tap(5362) - left_ap2_.Tap(1816) + left_d2_.Tap(3952) -
+                     right_d1_.Tap(3121) - right_ap2_.Tap(495) - right_d2_.Tap(179);
+        // seven taps add up to 18 bits, scale before multiplying to stay within 32 bits
+        out_l = Sat16(((yl >> 2) * kOutputGain) >> 13);
+        out_r = Sat16(((yr >> 2) * kOutputGain) >> 13);
+    }
+
+    bool IsReady() const
+    {
+        return ready_;
+    }
+
+private:
+    static constexpr float kLoopSeconds = 31915.f / 44000.f; // total length of the two tanks
+    static constexpr float kInputTrim = 0.9f;
+    static constexpr int32_t kOutputGain = 19661; // 0.6
+    static constexpr uint32_t kLfoIncrementLeft = 91000;   // about 0.93 Hz
+    static constexpr uint32_t kLfoIncrementRight = 114000; // about 1.17 Hz
+
+    /** Plain delay line: Read() gives the oldest sample, Write() replaces it and advances. */
+    struct Delay
+    {
+        int16_t *buf = nullptr;
+        uint16_t len = 1;
+        uint16_t idx = 0;
+        void Setup(int16_t *b, uint16_t l)
+        {
+            buf = b;
+            len = l;
+            idx = 0;
+        }
+        void Clear()
+        {
+            std::memset(buf, 0, len * sizeof(int16_t));
+            idx = 0;
+        }
+        inline int32_t Read() const
+        {
+            return buf[idx];
+        }
+        inline void Write(int32_t v)
+        {
+            buf[idx] = static_cast<int16_t>(v);
+            if (++idx >= len)
+            {
+                idx = 0;
+            }
+        }
+        /** The sample written k samples ago (1 = the newest), valid after Write() */
+        inline int32_t Tap(uint16_t k) const
+        {
+            return buf[idx >= k ? idx - k : idx + len - k];
+        }
+    };
+
+    /** Schroeder all-pass, w[n] = x[n] + g w[n-D], y[n] = w[n-D] - g w[n] */
+    struct Allpass : Delay
+    {
+        inline int32_t Process(int32_t x, int32_t g)
+        {
+            int32_t d = buf[idx];
+            int32_t w = Sat16(x + ((g * d + 0x4000) >> 15));
+            int32_t y = Sat16(d - ((g * w + 0x4000) >> 15));
+            Write(w);
+            return y;
+        }
+    };
+
+    /** The same with a delay modulated by +-kExcursion samples (linear interpolation) */
+    struct ModAllpass
+    {
+        int16_t *buf = nullptr;
+        uint16_t nominal = 1;
+        uint16_t len = 1;
+        uint16_t idx = 0;
+        void Setup(int16_t *b, uint16_t nominal_delay, uint16_t buffer_len)
+        {
+            buf = b;
+            nominal = nominal_delay;
+            len = buffer_len;
+            idx = 0;
+        }
+        void Clear()
+        {
+            std::memset(buf, 0, len * sizeof(int16_t));
+            idx = 0;
+        }
+        /** @param mod delay offset in 1/256 samples */
+        inline int32_t Process(int32_t x, int32_t g, int32_t mod)
+        {
+            int32_t fixed = (static_cast<int32_t>(nominal) << 8) + mod;
+            int32_t di = fixed >> 8;
+            int32_t frac = fixed & 255;
+            int32_t p0 = idx - di;
+            int32_t p1 = p0 - 1;
+            if (p0 < 0)
+            {
+                p0 += len;
+            }
+            if (p1 < 0)
+            {
+                p1 += len;
+            }
+            int32_t a = buf[p0];
+            int32_t d = a + (((buf[p1] - a) * frac) >> 8);
+            int32_t w = Sat16(x + ((g * d + 0x4000) >> 15));
+            int32_t y = Sat16(d - ((g * w + 0x4000) >> 15));
+            buf[idx] = static_cast<int16_t>(w);
+            if (++idx >= len)
+            {
+                idx = 0;
+            }
+            return y;
+        }
+    };
+
+    int16_t *predelay_ = nullptr;
+    size_t predelay_write_ = 0;
+    size_t predelay_len_ = 0;
+    Allpass input_ap_[plate_detail::kInputAllpasses];
+    ModAllpass left_mod_;
+    Delay left_d1_;
+    Allpass left_ap2_;
+    Delay left_d2_;
+    ModAllpass right_mod_;
+    Delay right_d1_;
+    Allpass right_ap2_;
+    Delay right_d2_;
+    int32_t lp_in_ = 0;
+    int32_t lp_left_ = 0;
+    int32_t lp_right_ = 0;
+    int32_t decay_ = 0;
+    int32_t input_gain_ = 0;
+    int32_t damping_ = 32767;
+    uint32_t lfo_phase_ = 0;
+    uint32_t lfo_phase_right_ = 0x40000000u;
+    uint32_t rng_ = 0x2468ace1u;
+    bool ready_ = false;
+};
+
+/* ------------------------------------------------------------------------------------------------
  *  DISTORTION
  * ---------------------------------------------------------------------------------------------- */
 

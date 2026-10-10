@@ -720,6 +720,286 @@ static void TestDistortion(const std::string &demo_dir, const std::vector<double
     }
 }
 
+
+static void TestPhaser(const std::string &demo_dir, const std::vector<double> &melody)
+{
+    std::printf("Phaser\n");
+    Phaser ph;
+
+    // The all-pass chain alone must not change the level
+    {
+        ph.Reset();
+        ph.SetRate(0.5f);
+        ph.SetFeedback(0);
+        auto in = Noise(static_cast<size_t>(kFs * 3), -20.0);
+        std::vector<double> out;
+        for (double s : in)
+        {
+            int32_t l, r;
+            ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+            out.push_back(l);
+        }
+        double g = Db(Rms(out, 20000)) - Db(Rms(in, 20000));
+        Check(std::fabs(g) < 0.5, "All-pass chain keeps the level", Fmt("(%.2f dB)", g).c_str());
+    }
+
+    // Frequency response at two fixed sweep positions (rate 0; the right side is 90 degrees ahead = the sweep's top)
+    {
+        ph.Reset();
+        ph.SetRate(0.f);
+        ph.SetFeedback(0);
+        ph.SetStereoPhase(0x40000000u);
+        auto in = Noise(static_cast<size_t>(kFs * 6), -20.0);
+        std::vector<double> ol, orr, mixl, mixr;
+        for (double s : in)
+        {
+            int32_t l, r;
+            ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+            mixl.push_back((s + l) * 0.5);
+            mixr.push_back((s + r) * 0.5);
+        }
+        auto notch = [&](const std::vector<double> &mix, double &deepest_db, double &deepest_hz, double &peak_db)
+        {
+            deepest_db = 99;
+            peak_db = -99;
+            deepest_hz = 0;
+            for (double f = 120; f < 9000; f *= 1.04)
+            {
+                double h = Db(Goertzel(mix, f, 22000, 200000) / std::max(1e-9, Goertzel(in, f, 22000, 200000)));
+                if (h < deepest_db)
+                {
+                    deepest_db = h;
+                    deepest_hz = f;
+                }
+                peak_db = std::max(peak_db, h);
+            }
+        };
+        double dl, hl, pl, dr, hr, pr;
+        notch(mixl, dl, hl, pl);
+        notch(mixr, dr, hr, pr);
+        // Noise gives a noisy estimate of the response, so the notch depth is judged generously
+        Check(dl < -12.0, "50/50 mix has a deep notch (sweep centre)", Fmt("(%.1f dB at %.0f Hz)", dl, hl).c_str());
+        Check(dr < -12.0, "50/50 mix has a deep notch (sweep top)", Fmt("(%.1f dB at %.0f Hz)", dr, hr).c_str());
+        Check(hr > hl * 1.5, "Notch moves up when the sweep moves up", Fmt("(%.0f Hz -> %.0f Hz)", hl, hr).c_str());
+        Check(pl < 1.0 && pr < 1.0, "No gain above 0 dB without feedback", Fmt("(peaks %+.1f / %+.1f dB)", pl, pr).c_str());
+
+        // Feedback makes the response peakier
+        ph.Reset();
+        ph.SetFeedback(27000);
+        std::vector<double> fb;
+        for (double s : in)
+        {
+            int32_t l, r;
+            ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+            fb.push_back((s + l) * 0.5);
+        }
+        double d2, h2, p2;
+        notch(fb, d2, h2, p2);
+        Check(p2 > 6.0 && p2 < 20.0, "Feedback creates resonant peaks", Fmt("(peak %+.1f dB)", p2).c_str());
+    }
+
+    // Full-scale noise with maximum feedback stays bounded
+    {
+        ph.Reset();
+        ph.SetRate(7.f);
+        ph.SetFeedback(32767);
+        int32_t peak = 0;
+        std::mt19937 g(5);
+        for (int i = 0; i < 400000; i++)
+        {
+            int32_t a = (g() & 1) ? 32767 : -32768, l, r;
+            ph.Process(a, -a, l, r);
+            peak = std::max({peak, std::abs(l), std::abs(r)});
+        }
+        Check(peak <= 32768, "Maximum feedback with full scale input stays in range");
+    }
+
+    if (!demo_dir.empty())
+    {
+        for (auto [name, rate, fb] : {std::tuple{"phaser_slow", 0.2f, 12000}, std::tuple{"phaser_resonant", 0.6f, 26000}})
+        {
+            ph.Reset();
+            ph.SetRate(rate);
+            ph.SetFeedback(fb);
+            ph.SetStereoPhase(0x40000000u);
+            std::vector<double> ol, orr;
+            for (double s : melody)
+            {
+                int32_t l, r;
+                ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+                ol.push_back((s + l) * 0.5);
+                orr.push_back((s + r) * 0.5);
+            }
+            WriteWav(demo_dir + "/" + name + ".wav", ol, orr);
+        }
+    }
+}
+
+static void TestPlate(const std::string &demo_dir, const std::vector<double> &melody)
+{
+    std::printf("Plate reverb\n");
+    Pools p;
+    PlateReverb pr;
+    Check(pr.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size()), "Init with 50800-word buffers", Fmt("(needs %.0f + %.0f words)", PlateReverb::kLeftWords, PlateReverb::kRightWords).c_str());
+    Check(!PlateReverb().Init(p.l.data(), 1000, p.r.data(), 1000), "Init rejects buffers that are too small");
+
+    for (float rt : {0.5f, 1.5f, 4.0f, 10.0f})
+    {
+        pr.Clear();
+        pr.SetDecay(rt);
+        pr.SetDamping(32767);
+        size_t n = static_cast<size_t>(kFs * (rt * 2.5 + 1));
+        std::vector<double> ir(n);
+        for (size_t i = 0; i < n; i++)
+        {
+            int32_t l, r;
+            pr.Process(i == 0 ? 30000 : 0, i == 0 ? 30000 : 0, l, r);
+            ir[i] = l;
+        }
+        std::vector<double> edc(n);
+        double acc = 0;
+        for (size_t i = n; i-- > 0;)
+        {
+            acc += ir[i] * ir[i];
+            edc[i] = acc;
+        }
+        size_t i5 = 0, i25 = 0;
+        for (size_t i = 0; i < n; i++)
+        {
+            double d = 10 * std::log10(edc[i] / edc[0] + 1e-30);
+            if (!i5 && d <= -5)
+            {
+                i5 = i;
+            }
+            if (!i25 && d <= -25)
+            {
+                i25 = i;
+                break;
+            }
+        }
+        double measured = (i25 - i5) / kFs * 3.0;
+        Check(measured > rt * 0.6 && measured < rt * 1.5, "RT60 close to the requested time", Fmt("(requested %.1f s, measured %.2f s)", rt, measured).c_str());
+    }
+
+    {
+        pr.Clear();
+        pr.SetDecay(3.f);
+        std::vector<double> out;
+        for (size_t i = 0; i < static_cast<size_t>(kFs * 90); i++)
+        {
+            int32_t l, r;
+            pr.Process(i < 2000 ? 20000 : 0, i < 2000 ? 20000 : 0, l, r);
+            out.push_back(l);
+        }
+        double tail = Rms(out, out.size() - 44000, out.size());
+        Check(tail < 0.0001, "Tail decays to (almost) silence", Fmt("(final RMS %.6f of full scale)", tail).c_str());
+    }
+
+    {
+        auto in = Noise(static_cast<size_t>(kFs * 8), -20.0);
+        double hi = -99, lo = 99;
+        for (float rt : {0.3f, 1.f, 4.f, 15.f, 30.f})
+        {
+            for (int damp : {32767, 12000, 3000})
+            {
+                pr.Clear();
+                pr.SetDecay(rt);
+                pr.SetDamping(damp);
+                std::vector<double> out;
+                for (double s : in)
+                {
+                    int32_t l, r;
+                    pr.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+                    out.push_back(l);
+                }
+                double g = Db(Rms(out, out.size() / 2)) - Db(Rms(in, in.size() / 2));
+                if (std::getenv("FXPLUS_VERBOSE"))
+                {
+                    std::printf("    plate rt60 %5.1f s  damping %5d  wet level %+6.1f dB\n", rt, damp, g);
+                }
+                hi = std::max(hi, g);
+                lo = std::min(lo, g);
+            }
+        }
+        Check(hi < 3.0 && lo > -14.0, "Wet level stays within -14..+3 dB of the input for noise", Fmt("(range %.1f .. %.1f dB)", lo, hi).c_str());
+    }
+
+    {
+        pr.Clear();
+        pr.SetDecay(30.f);
+        pr.SetDamping(32767);
+        int32_t peak = 0;
+        for (size_t i = 0; i < 300000; i++)
+        {
+            int32_t l, r, s = ((i / 50) & 1) ? 32767 : -32768;
+            pr.Process(s, s, l, r);
+            peak = std::max({peak, std::abs(l), std::abs(r)});
+        }
+        Check(peak <= 32768, "Full scale square wave input does not overflow");
+    }
+
+    {
+        pr.Clear();
+        pr.SetDecay(2.f);
+        auto in = Noise(static_cast<size_t>(kFs * 3), -20.0);
+        double sll = 0, srr = 0, slr = 0;
+        for (size_t i = 0; i < in.size(); i++)
+        {
+            int32_t l, r;
+            pr.Process(static_cast<int32_t>(in[i]), static_cast<int32_t>(in[i]), l, r);
+            if (i > 44000)
+            {
+                sll += double(l) * l;
+                srr += double(r) * r;
+                slr += double(l) * r;
+            }
+        }
+        double corr = slr / std::sqrt(sll * srr);
+        Check(std::fabs(corr) < 0.4, "Left/right outputs decorrelated", Fmt("(correlation %.2f)", corr).c_str());
+    }
+
+    // Density: the impulse response must not have a few strong isolated echoes. Compare the loudest 5 ms block
+    // between 150 and 600 ms with the average of that span.
+    {
+        pr.Clear();
+        pr.SetDecay(3.f);
+        std::vector<double> ir(static_cast<size_t>(kFs * 0.7));
+        for (size_t i = 0; i < ir.size(); i++)
+        {
+            int32_t l, r;
+            pr.Process(i == 0 ? 30000 : 0, i == 0 ? 30000 : 0, l, r);
+            ir[i] = l;
+        }
+        size_t a = static_cast<size_t>(kFs * 0.15), b = static_cast<size_t>(kFs * 0.6), blk = static_cast<size_t>(kFs * 0.005);
+        double avg = Rms(ir, a, b), worst = 0;
+        for (size_t i = a; i + blk < b; i += blk)
+        {
+            worst = std::max(worst, Rms(ir, i, i + blk));
+        }
+        Check(Db(worst) - Db(avg) < 8.0, "Dense, no isolated echoes in the early tail", Fmt("(loudest 5 ms block is %.1f dB above the average)", Db(worst) - Db(avg)).c_str());
+    }
+
+    if (!demo_dir.empty())
+    {
+        for (auto [name, rt, damp] : {std::tuple{"plate_bright", 2.5f, 30000}, std::tuple{"plate_long_dark", 9.f, 5000}})
+        {
+            pr.Clear();
+            pr.SetDecay(rt);
+            pr.SetDamping(damp);
+            std::vector<double> ol, orr;
+            for (size_t i = 0; i < melody.size() + static_cast<size_t>(kFs * 3); i++)
+            {
+                double s = i < melody.size() ? melody[i] : 0;
+                int32_t l, r;
+                pr.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+                ol.push_back(s * 0.4 + l);
+                orr.push_back(s * 0.4 + r);
+            }
+            WriteWav(demo_dir + "/" + name + ".wav", ol, orr);
+        }
+    }
+}
+
 // Randomized stress test: parameters thrown around while loud random audio runs through. Meant for ASan/UBSan.
 static void Stress()
 {
@@ -729,17 +1009,21 @@ static void Stress()
     Chorus ch;
     PitchShifter ps;
     Distortion dl, dr;
+    PlateReverb plate;
+    Phaser phaser;
     std::mt19937 g(42);
     auto rnd = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(g); };
 
     // Each effect lives on its own part of the pool in the app? No: they share it, one at a time. Test each in turn on the same memory.
     int32_t peak = 0;
-    for (int round = 0; round < 40; round++)
+    for (int round = 0; round < 60; round++)
     {
-        int which = round % 4;
+        int which = round % 6;
         rv.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
         ch.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
         ps.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
+        plate.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
+        phaser.Reset();
         for (size_t i = 0; i < 30000; i++)
         {
             if (i % 997 == 0)
@@ -751,6 +1035,12 @@ static void Stress()
                 ch.SetDepth(static_cast<int32_t>(rnd(-100, 1000)));
                 ch.SetStereoPhase(static_cast<uint32_t>(g()));
                 ps.SetShift(static_cast<float>(rnd(-24, 24)), static_cast<float>(rnd(-100, 100)));
+                plate.SetDecay(static_cast<float>(rnd(0.0, 40.0)));
+                plate.SetDamping(static_cast<int32_t>(rnd(-1000, 40000)));
+                plate.SetPreDelay(static_cast<size_t>(rnd(0, 6000)));
+                phaser.SetRate(static_cast<float>(rnd(0.0, 30.0)));
+                phaser.SetFeedback(static_cast<int32_t>(rnd(-1000, 40000)));
+                phaser.SetStereoPhase(static_cast<uint32_t>(g()));
                 for (auto *x : {&dl, &dr})
                 {
                     x->SetDrive(static_cast<int32_t>(rnd(-100, 40000)));
@@ -776,6 +1066,12 @@ static void Stress()
                 l = dl.Process(a);
                 r = dr.Process(b);
                 break;
+            case 4:
+                plate.Process(a, b, l, r);
+                break;
+            case 5:
+                phaser.Process(a, b, l, r);
+                break;
             }
             peak = std::max({peak, std::abs(l), std::abs(r)});
         }
@@ -796,6 +1092,8 @@ int main(int argc, char **argv)
     TestChorus(demo, melody);
     TestPitch(demo, melody);
     TestDistortion(demo, melody);
+    TestPhaser(demo, melody);
+    TestPlate(demo, melody);
     Stress();
     std::printf("\n%s (%d failed)\n", g_fail ? "FAILURES" : "ALL TESTS PASSED", g_fail);
     return g_fail ? 1 : 0;
