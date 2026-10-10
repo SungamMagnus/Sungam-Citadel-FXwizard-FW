@@ -533,6 +533,43 @@ static void TestPitch(const std::string &demo_dir, const std::vector<double> &me
         Check(span > 25.0 && span < 55.0, "Stereo detune splits left and right", Fmt("(L %.1f Hz, R %.1f Hz, %.0f cents apart)", fl, fr, span).c_str());
     }
 
+    // Unity pitch is a clean pass-through, and getting there and away from it must not click
+    {
+        ps.Clear();
+        ps.SetShift(0.f, 0.f);
+        auto in = Sine(static_cast<size_t>(kFs * 2), 440.0, -12.0);
+        double max_err = 0;
+        for (size_t i = 0; i < in.size(); i++)
+        {
+            int32_t l, r;
+            ps.Process(static_cast<int32_t>(in[i]), static_cast<int32_t>(in[i]), l, r);
+            if (i > 2000)
+            {
+                max_err = std::max(max_err, std::fabs(l - std::floor(in[i])));
+            }
+        }
+        Check(max_err <= 1.0, "Zero semitones, no detune: output equals input", Fmt("(largest difference %.0f LSB)", max_err).c_str());
+
+        // sweep: +0.2 st -> 0 -> +0.2 st, largest sample-to-sample step compared with the signal's own
+        double worst_step = 0, signal_step = 0, prev = 0;
+        ps.Clear();
+        for (size_t i = 0; i < static_cast<size_t>(kFs * 3); i++)
+        {
+            if (i == static_cast<size_t>(kFs)) ps.SetShift(0.f, 0.f);
+            if (i == 0 || i == static_cast<size_t>(kFs * 2)) ps.SetShift(0.2f, 0.f);
+            double s = 0.25 * 32768 * std::sin(2 * M_PI * 440.0 * i / kFs);
+            int32_t l, r;
+            ps.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+            if (i > 30000)
+            {
+                worst_step = std::max(worst_step, std::fabs(l - prev));
+                signal_step = std::max(signal_step, 0.25 * 32768 * 2 * M_PI * 440.0 / kFs);
+            }
+            prev = l;
+        }
+        Check(worst_step < signal_step * 2.5, "Entering and leaving unity does not click", Fmt("(largest step %.0f, a plain sine of this level steps up to %.0f)", worst_step, signal_step).c_str());
+    }
+
     // Broadband signal stays bounded
     {
         ps.Clear();

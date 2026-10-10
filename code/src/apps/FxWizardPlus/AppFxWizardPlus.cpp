@@ -130,18 +130,6 @@ void AppFxWizardPlus::Init()
     dj_filter_left_.SetResonance(0.0f, Svf::ForceValue::TRUE);
     dj_filter_right_.SetResonance(0.0f, Svf::ForceValue::TRUE);
 
-    pitcher_frequency_ = 0.f;
-    pitcher_dry_wet_ = Q15_ZERO;
-    pitcher_depth_ = Q15_ZERO;
-    pitcher_stereo_mix_ = Q15_ZERO;
-    pitcher_env_.Init(AUDIO_LOOP_RATE);
-    pitcher_env_.SetAttackTime(kPitcherEnvAttack);
-    pitcher_env_.SetDecayTime(kPitcherEnvDecay);
-    pitcher_env_.SetSustainLevel(Q31_ZERO);
-    pitcher_env_.SetReleaseTime(0.f);
-    pitcher_env_depth_ = Q31_ZERO;
-    pitcher_depth_modulated_ = Q31_ZERO;
-
     delay_left_ = std::make_unique<AdvancedDynamicDelayLine<q15least_t>>(50800);
     delay_right_ = std::make_unique<AdvancedDynamicDelayLine<q15least_t>>(50800);
 
@@ -150,6 +138,7 @@ void AppFxWizardPlus::Init()
     reverb_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     chorus_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     plate_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
+    pitch_shifter_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     phaser_.Reset();
     delay_pool_dirty_ = false; // the delay lines start out zeroed
     delay_compressor_.Init(SAMPLE_RATE / delay_peak_counter_max_);
@@ -295,6 +284,7 @@ FASTCODE void AppFxWizardPlus::AudioLoop(q15_t *input, q15_t *output, size_t siz
     reverb_ready_ = reverb_ready_ && mode_ == Mode::REVERB;
     chorus_ready_ = chorus_ready_ && mode_ == Mode::CHORUS;
     plate_ready_ = plate_ready_ && mode_ == Mode::PLATE;
+    pitch_shifter_ready_ = pitch_shifter_ready_ && mode_ == Mode::PITCH_SHIFTER;
 
     // Set data for the second core
     input_buffer_ = input;
@@ -353,8 +343,8 @@ FASTCODE void AppFxWizardPlus::AudioLoop(q15_t *input, q15_t *output, size_t siz
             ModeDistortion();
             break;
 
-        case Mode::PITCHER:
-            ModePitcher();
+        case Mode::PITCH_SHIFTER:
+            ModePitchShifter();
             break;
         }
 
@@ -554,19 +544,6 @@ void AppFxWizardPlus::UiLoop()
 
     switch (mode_)
     {
-    case Mode::PITCHER:
-        SetDryWet(curve_map(dry_wet, kMapPitcherGlobalDryWet));
-        feedback_delay_ = curve_map(feedback, kMapPitcherGlobalFeedbackDelay);
-        feedback_volume_ = curve_map(feedback, kMapPitcherGlobalFeedbackVolume);
-        pitcher_dry_wet_ = curve_map(dry_wet, kMapPitcherDryWet);
-        pitcher_depth_ = q15_to_q31(curve_map(dry_wet, kMapPitcherDepth));
-        pitcher_frequency_ = curve_map(time, kMapPitcherFrequency, MapClamp::TRUE, MapSafe::TRUE);
-        pitcher_stereo_mix_ = q15_to_q31(curve_map(stereo, kMapPitcherStereoMix));
-        lfo_left_.SetNativeFrequency(pitcher_frequency_);
-        lfo_right_.SetNativeFrequency(q31_add(pitcher_frequency_, curve_map(stereo, kMapPitcherStereoFrequency, MapClamp::TRUE, MapSafe::TRUE)));
-        pitcher_env_depth_ = curve_map(dry_wet, kMapPitcherEnvDepth, MapClamp::TRUE);
-        break;
-
     case Mode::DELAY:
         SetDryWet(curve_map(dry_wet, kMapDelayGlobalDryWet));
         feedback_delay_ = curve_map(feedback, kMapDelayGlobalFeedbackDelay);
@@ -727,6 +704,36 @@ void AppFxWizardPlus::UiLoop()
         break;
     }
 
+    case Mode::PITCH_SHIFTER:
+    {
+        SetDryWet(curve_map(dry_wet, kMapPitchShifterGlobalDryWet));
+        feedback_delay_ = curve_map(feedback, kMapPitchShifterGlobalFeedbackDelay);
+        feedback_volume_ = curve_map(feedback, kMapPitchShifterGlobalFeedbackVolume);
+        pitch_shifter_dry_ = curve_map(dry_wet, kMapPitchShifterDry);
+        pitch_shifter_wet_ = curve_map(dry_wet, kMapPitchShifterWet);
+
+        // Time knob: +- kPitchShifterRangeSemitones, snapping to whole semitones near them
+        float semitones = (static_cast<float>(time) / static_cast<float>(POT_MAX) * 2.f - 1.f) * kPitchShifterRangeSemitones;
+        float nearest = static_cast<float>(static_cast<int32_t>(semitones + (semitones >= 0.f ? 0.5f : -0.5f)));
+        if (semitones - nearest < kPitchShifterDetentWidth && nearest - semitones < kPitchShifterDetentWidth)
+        {
+            semitones = nearest;
+        }
+        float detune = curve_map(stereo, kMapPitchShifterDetune, MapClamp::TRUE);
+
+        // Changing the pitch is expensive (floating point exp2), only do it when the knobs really moved:
+        // 1/16 semitone and 2 cent resolution
+        int32_t semitones_key = static_cast<int32_t>(semitones * 16.f + (semitones >= 0.f ? 0.5f : -0.5f));
+        int32_t detune_key = static_cast<int32_t>(detune * 0.5f);
+        if (semitones_key != pitch_shifter_semitones_key_ || detune_key != pitch_shifter_detune_key_)
+        {
+            pitch_shifter_semitones_key_ = semitones_key;
+            pitch_shifter_detune_key_ = detune_key;
+            pitch_shifter_.SetShift(semitones, detune);
+        }
+        break;
+    }
+
     case Mode::DISTORTION:
     {
         SetDryWet(curve_map(dry_wet, kMapDistortionGlobalDryWet));
@@ -784,8 +791,8 @@ void AppFxWizardPlus::ModeInit()
 {
     mode_selector_.SendMidi();
 
-    // The reverbs and the chorus use the memory of the long delay lines.
-    // When switching to anything else, wipe it so delay and pitcher don't play back what's left of them.
+    // The reverbs, chorus and pitch shifter use the memory of the long delay lines.
+    // When switching to anything else, wipe it so the delay doesn't play back what's left of them.
     if (delay_pool_dirty_ && !UsesDelayPool(mode_))
     {
         std::memset(delay_left_->GetBuffer(), 0, delay_left_->GetMaxLength() * sizeof(q15least_t));
@@ -795,9 +802,6 @@ void AppFxWizardPlus::ModeInit()
 
     switch (mode_)
     {
-    case Mode::PITCHER:
-        ModePitcherInit();
-        break;
     case Mode::DELAY:
         ModeDelayInit();
         break;
@@ -812,6 +816,9 @@ void AppFxWizardPlus::ModeInit()
         break;
     case Mode::PLATE:
         ModePlateInit();
+        break;
+    case Mode::PITCH_SHIFTER:
+        ModePitchShifterInit();
         break;
     case Mode::DISTORTION:
         ModeDistortionInit();
@@ -853,12 +860,6 @@ void AppFxWizardPlus::ModeTrigger()
         chorus_.ResetPhase();
         break;
 
-    case Mode::PITCHER:
-        pitcher_env_.Trigger();
-        lfo_left_.Reset();
-        lfo_right_.Reset();
-        break;
-
     default:
         // nothing to trigger in the other modes, the LEDs still blink
         break;
@@ -872,90 +873,17 @@ void AppFxWizardPlus::WorkLongDelay()
     switch (mode_)
     {
     case Mode::DELAY:
-    case Mode::PITCHER:
     // These use the memory of the long delay for their own purposes, it must not be written to
     case Mode::CHORUS:
     case Mode::REVERB:
     case Mode::PLATE:
+    case Mode::PITCH_SHIFTER:
         break;
 
     default:
         delay_left_->Write(input_left_);
         delay_right_->Write(input_right_);
     }
-}
-
-void AppFxWizardPlus::ModePitcherInit()
-{
-    lfo_left_.SetWaveform(Oscillator::Waveform::SAW);
-    lfo_right_.SetWaveform(Oscillator::Waveform::SAW);
-}
-
-void AppFxWizardPlus::ModePitcher()
-{
-    delay_left_->Write(input_left_);
-    delay_right_->Write(input_right_);
-
-    q31_t lfo_l = lfo_left_.Process();
-    q31_t lfo_r = q31_mult(lfo_l, pitcher_stereo_mix_) + q31_mult(lfo_right_.Process(), Q31_MAX - pitcher_stereo_mix_);
-
-    // modulate modulation depth with pitcher envelope
-    if (sample_being_processed_ == 0)
-    {
-        q31_t tmp = q31_mult(pitcher_env_.Process(), q31(0.8f));
-        pitcher_depth_modulated_ = q31_mult(pitcher_depth_, Q31_MAX - tmp);
-    }
-    // control modulation depth
-    lfo_l = q31_mult(lfo_l / 2 + Q31_HALF, q31_mult(lfo_left_.GetTicks(), pitcher_depth_modulated_));
-    lfo_r = q31_mult(lfo_r / 2 + Q31_HALF, q31_mult(lfo_right_.GetTicks(), pitcher_depth_modulated_));
-
-    // increase modulation depth
-    lfo_l *= 4;
-    lfo_r *= 4;
-
-    // limit the range for the effect to not drop out
-    lfo_l %= delay_left_->GetMaxLength();
-    lfo_r %= delay_right_->GetMaxLength();
-
-    delay_left_->SetDelaySnap(lfo_l);
-    delay_right_->SetDelaySnap(lfo_r);
-
-    int32_t left = delay_left_->Read();
-    int32_t right = delay_right_->Read();
-
-    // fade the volume near the lfo phase reset to remove clicks - left channel
-    int32_t remaining_ticks = lfo_left_.GetTicks() - lfo_left_.GetElapsedTicks();
-    if (remaining_ticks < 0)
-    {
-        remaining_ticks = 0;
-    }
-    size_t elapsed_ticks = lfo_left_.GetElapsedTicks();
-    if (elapsed_ticks < 64)
-    {
-        left = q15_mult(left, elapsed_ticks << (15 - 6));
-    }
-    else if (remaining_ticks < 64)
-    {
-        left = q15_mult(left, remaining_ticks << (15 - 6));
-    }
-    // fade the volume near the lfo phase reset to remove clicks - right channel
-    remaining_ticks = lfo_right_.GetTicks() - lfo_right_.GetElapsedTicks();
-    if (remaining_ticks < 0)
-    {
-        remaining_ticks = 0;
-    }
-    elapsed_ticks = lfo_right_.GetElapsedTicks();
-    if (elapsed_ticks < 64)
-    {
-        right = q15_mult(right, elapsed_ticks << (15 - 6));
-    }
-    else if (remaining_ticks < 64)
-    {
-        right = q15_mult(right, remaining_ticks << (15 - 6));
-    }
-
-    output_left_ = q15_mult(input_left_, Q15_MAX - pitcher_dry_wet_) + q15_mult(left, pitcher_dry_wet_);
-    output_right_ = q15_mult(input_right_, Q15_MAX - pitcher_dry_wet_) + q15_mult(right, pitcher_dry_wet_);
 }
 
 void AppFxWizardPlus::ModeDelayInit()
@@ -1072,6 +1000,32 @@ void AppFxWizardPlus::ModePlate()
 
     output_left_ = q15_add(q15_mult(input_left_, plate_dry_), q15_mult(wet_left, plate_wet_));
     output_right_ = q15_add(q15_mult(input_right_, plate_dry_), q15_mult(wet_right, plate_wet_));
+}
+
+void AppFxWizardPlus::ModePitchShifterInit()
+{
+    delay_pool_dirty_ = true;
+    pitch_shifter_.Clear();
+    // make UiLoop send the pitch again
+    pitch_shifter_semitones_key_ = INT32_MIN;
+    pitch_shifter_detune_key_ = INT32_MIN;
+    pitch_shifter_ready_ = true;
+}
+
+void AppFxWizardPlus::ModePitchShifter()
+{
+    if (!pitch_shifter_ready_)
+    {
+        output_left_ = input_left_;
+        output_right_ = input_right_;
+        return;
+    }
+
+    int32_t wet_left, wet_right;
+    pitch_shifter_.Process(input_left_, input_right_, wet_left, wet_right);
+
+    output_left_ = q15_add(q15_mult(input_left_, pitch_shifter_dry_), q15_mult(wet_left, pitch_shifter_wet_));
+    output_right_ = q15_add(q15_mult(input_right_, pitch_shifter_dry_), q15_mult(wet_right, pitch_shifter_wet_));
 }
 
 void AppFxWizardPlus::ModeChorusInit()

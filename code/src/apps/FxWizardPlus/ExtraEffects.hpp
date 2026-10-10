@@ -533,8 +533,7 @@ private:
  * moment a tap wraps around. Left and right can be shifted by slightly different amounts (detune).
  * Needs kWords int16 samples per side (16 kB). Adds up to one window (93 ms) of latency to the wet signal.
  *
- * @note At exactly unity pitch the taps stand still, which turns the effect into a fixed ~46 ms delay.
- *       Combined with the dry signal this gives a comb filter; use a non-zero shift or the stereo detune.
+ * @note At exactly unity pitch (no shift, no detune on that side) the output is the input itself, crossfaded in and out.
  */
 class PitchShifter
 {
@@ -595,6 +594,13 @@ public:
         out_l = Shift(buf_l_, phase_l_);
         out_r = Shift(buf_r_, phase_r_);
 
+        // At exactly unity pitch the taps would stand still (a fixed delay, i.e. a comb filter with the dry signal),
+        // so there the output is the input itself. Crossfaded over 512 samples to avoid a click at the transition.
+        unity_l_ = Approach(unity_l_, inc_l_ == 0 ? 32768 : 0);
+        unity_r_ = Approach(unity_r_, inc_r_ == 0 ? 32768 : 0);
+        out_l = (out_l * (32768 - unity_l_) + Sat16(in_l) * unity_l_) >> 15;
+        out_r = (out_r * (32768 - unity_r_) + Sat16(in_r) * unity_r_) >> 15;
+
         write_ = (write_ + 1) & (kWords - 1);
         phase_l_ += static_cast<uint32_t>(inc_l_);
         phase_r_ += static_cast<uint32_t>(inc_r_);
@@ -606,6 +612,15 @@ public:
     }
 
 private:
+    static inline int32_t Approach(int32_t value, int32_t target)
+    {
+        if (value < target)
+        {
+            return value + 64 > target ? target : value + 64;
+        }
+        return value - 64 < target ? target : value - 64;
+    }
+
     /** @brief Phase increment per sample: the delay changes by (1 - ratio) samples every sample. */
     static int32_t IncrementFor(float ratio)
     {
@@ -659,6 +674,8 @@ private:
     uint32_t phase_r_ = 0;
     int32_t inc_l_ = 0;
     int32_t inc_r_ = 0;
+    int32_t unity_l_ = 0; // 0 = shifted signal, 32768 = input
+    int32_t unity_r_ = 0;
     bool ready_ = false;
 };
 

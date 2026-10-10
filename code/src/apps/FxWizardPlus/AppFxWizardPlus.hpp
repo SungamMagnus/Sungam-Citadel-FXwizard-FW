@@ -60,10 +60,10 @@ namespace kastle2
  * @class AppFxWizardPlus
  * @ingroup apps
  * @brief FX Wizard variant with seven effects: delay, chorus, phaser, reverb (hall), reverb (plate),
- *        distortion and pitcher. Based on the Bastl Instruments FX Wizard (Marek Mach, Vaclav Mach, 2024).
+ *        distortion and pitch shifter. Based on the Bastl Instruments FX Wizard (Marek Mach, Vaclav Mach, 2024).
  *
- * Delay and Pitcher are the stock FX Wizard modes, the others are new, see ExtraEffects.hpp for their DSP.
- * The stock Flanger, Freezer, Panner, Crusher, Slicer, Replayer and Shifter were removed.
+ * Delay is the stock FX Wizard mode, the others are new, see ExtraEffects.hpp for their DSP.
+ * The stock Flanger, Freezer, Panner, Crusher, Slicer, Replayer, Pitcher and Shifter were removed.
  */
 
 class AppFxWizardPlus : public virtual App
@@ -81,7 +81,7 @@ public:
         REVERB,     // PURPLE, comb based hall / room
         PLATE,      // BLUE, Dattorro plate
         DISTORTION, // YELLOW
-        PITCHER,    // RASPBERRY
+        PITCH_SHIFTER, // INDIGO, harmonizer style
         COUNT,
     };
 
@@ -95,7 +95,7 @@ public:
         WS2812::PURPLE,
         WS2812::BLUE,
         WS2812::YELLOW,
-        WS2812::RASPBERRY,
+        WS2812::INDIGO,
     };
 
     /**
@@ -229,15 +229,6 @@ private:
     q15_t global_dry_wet_ = Q15_ZERO;
     q15_t global_dry_wet_queue_ = Q15_ZERO;
 
-    // pitcher
-    q31_t pitcher_frequency_ = 0.f;
-    q15_t pitcher_dry_wet_ = Q15_ZERO;
-    q31_t pitcher_depth_ = Q31_ZERO;
-    q31_t pitcher_stereo_mix_ = Q15_ZERO;
-    AdsrEnv pitcher_env_;
-    q15_t pitcher_env_depth_ = Q15_ZERO;
-    q15_t pitcher_depth_modulated_ = Q15_ZERO;
-
     // delay
     q15_t delay_wet_ = Q15_ZERO;
     q15_t delay_dry_ = Q15_ZERO;
@@ -277,6 +268,13 @@ private:
     float plate_decay_prev_ = -1.f;
     int32_t plate_damping_prev_ = -1;
 
+    // pitch shifter
+    fxplus::PitchShifter pitch_shifter_;
+    q15_t pitch_shifter_dry_ = Q15_ZERO;
+    q15_t pitch_shifter_wet_ = Q15_MAX;
+    int32_t pitch_shifter_semitones_key_ = INT32_MIN; // knob position in 1/16 semitones, for detecting changes
+    int32_t pitch_shifter_detune_key_ = INT32_MIN;
+
     // phaser
     fxplus::Phaser phaser_;
     q15_t phaser_dry_ = Q15_MAX;
@@ -302,6 +300,7 @@ private:
     volatile bool reverb_ready_ = false;
     volatile bool chorus_ready_ = false;
     volatile bool plate_ready_ = false;
+    volatile bool pitch_shifter_ready_ = false;
 
     /**
      * @brief True while the long delay lines contain data of the extra effects (not audio for the stock modes).
@@ -314,7 +313,7 @@ private:
      */
     static constexpr bool UsesDelayPool(Mode mode)
     {
-        return mode == Mode::REVERB || mode == Mode::PLATE || mode == Mode::CHORUS;
+        return mode == Mode::REVERB || mode == Mode::PLATE || mode == Mode::CHORUS || mode == Mode::PITCH_SHIFTER;
     }
 
     std::unique_ptr<AdvancedDynamicDelayLine<q15least_t>> feedback_delay_left_;
@@ -335,8 +334,8 @@ private:
     void ModeTrigger();
     void WorkLongDelay();
 
-    void ModePitcherInit();
-    void ModePitcher();
+    void ModePitchShifterInit();
+    void ModePitchShifter();
     void ModeDelayInit();
     void ModeDelay();
     void ModeReverbInit();

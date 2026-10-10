@@ -52,46 +52,6 @@ static constexpr auto kMapDjFilter = MapDef<int32_t, 4>{
     {pot(0.0f), pot(0.49f), pot(0.51f), pot(1.0f)},
     {q15(-0.8f), q15(0.0f), q15(0.0f), q15(0.9f)}};
 
-// --- PITCHER ---
-static constexpr auto kMapPitcherDryWet = MapDef<int32_t, 5>{
-    {pot(0.0f), pot(0.15f), pot(0.5f), pot(0.85f), pot(1.0f)},
-    {q15(0.0f), q15(0.62f), q15(0.62f), q15(0.62f), q15(1.0f)}};
-
-static constexpr auto kMapPitcherFrequency = MapDef<int32_t, 5>{
-    {pot(0.0f), pot(0.25f), pot(0.4f), pot(0.6f), pot(1.0f)},
-    {fq31(2.f), fq31(10.f), fq31(40.f), fq31(100.f), fq31(1000.f)}};
-
-static constexpr auto kMapPitcherDepth = MapDef<int32_t, 2>{
-    {pot(0.0f), pot(1.0f)},
-    {q15(0.0f), q15(1.0f)}};
-
-static constexpr auto kMapPitcherStereoMix = MapDef<int32_t, 3>{
-    {pot(0.0f), pot(0.2f), pot(1.0f)},
-    {q15(1.0f), q15(0.0f), q15(0.0f)}};
-
-static constexpr auto kMapPitcherStereoFrequency = MapDef<int32_t, 3>{
-    {pot(0.0f), pot(0.1f), pot(1.0f)},
-    {fq31(0.f), fq31(0.f), fq31(200.f)}};
-
-static const float kPitcherEnvAttack = 0.1f;
-static const float kPitcherEnvDecay = 1.f;
-
-static constexpr auto kMapPitcherEnvDepth = MapDef<int32_t, 2>{
-    {pot(0.0f), pot(1.0f)},
-    {q15(1.0f), q15(1.0f)}};
-
-static constexpr auto kMapPitcherGlobalDryWet = MapDef<int32_t, 3>{
-    {pot(0.0f), pot(0.15f), pot(1.0f)},
-    {q15(0.0f), q15(1.0f), q15(1.0f)}};
-
-static constexpr auto kMapPitcherGlobalFeedbackDelay = MapDef<int32_t, 3>{
-    {pot(0.0f), pot(0.55f), pot(1.0f)},
-    {100, 636, 1000}};
-
-static constexpr auto kMapPitcherGlobalFeedbackVolume = MapDef<int32_t, 4>{
-    {pot(0.0f), pot(0.15f), pot(0.5f), pot(1.0f)},
-    {q15(0.0f), q15(0.04f), q15(0.07f), q15(0.15f)}};
-
 // --- DELAY ---
 static constexpr auto kMapDelayDry = MapDef<int32_t, 3>{
     {pot(0.0f), pot(0.5f), pot(1.0f)},
@@ -262,6 +222,36 @@ static constexpr auto kMapDistortionWet = MapDef<int32_t, 2>{
 static constexpr auto kMapDistortionDry = MapDef<int32_t, 2>{
     {pot(0.0f), pot(1.0f)},
     {q15(1.0f), q15(0.0f)}};
+
+// --- PITCH SHIFTER ---
+// TIME: pitch, -12 .. +12 semitones with detents at whole semitones. FEEDBACK: global feedback (cascading shifts).
+// AMOUNT: dry/wet. STEREO: detune between left and right.
+static constexpr auto kMapPitchShifterGlobalDryWet = MapDef<int32_t, 3>{
+    {pot(0.0f), pot(0.1f), pot(1.0f)},
+    {q15(0.0f), q15(1.0f), q15(1.0f)}};
+
+static constexpr float kPitchShifterRangeSemitones = 12.f; ///< Time knob covers +- this
+static constexpr float kPitchShifterDetentWidth = 0.25f;   ///< Within this of a whole semitone the pitch snaps to it
+
+static constexpr auto kMapPitchShifterDetune = MapDef<float, 2>{
+    {pot(0.0f), pot(1.0f)},
+    {0.f, 40.f}}; // cents between left and right
+
+static constexpr auto kMapPitchShifterWet = MapDef<int32_t, 3>{
+    {pot(0.0f), pot(0.5f), pot(1.0f)},
+    {q15(0.0f), q15(0.7f), q15(1.0f)}};
+
+static constexpr auto kMapPitchShifterDry = MapDef<int32_t, 3>{
+    {pot(0.0f), pot(0.5f), pot(1.0f)},
+    {q15(1.0f), q15(0.7f), q15(0.0f)}};
+
+static constexpr auto kMapPitchShifterGlobalFeedbackDelay = MapDef<int32_t, 3>{
+    {pot(0.0f), pot(0.55f), pot(1.0f)},
+    {300, 636, 1000}};
+
+static constexpr auto kMapPitchShifterGlobalFeedbackVolume = MapDef<int32_t, 4>{
+    {pot(0.0f), pot(0.15f), pot(0.5f), pot(1.0f)},
+    {q15(0.0f), q15(0.03f), q15(0.06f), q15(0.1f)}};
 
 // --- PHASER ---
 // TIME: LFO rate. FEEDBACK: resonance. AMOUNT: dry/wet (full amount is 1:1, which gives the deepest notches).

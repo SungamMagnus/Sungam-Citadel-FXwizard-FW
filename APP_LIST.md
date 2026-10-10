@@ -56,7 +56,7 @@ Have you made a firmware? Feel free to pick an ID and make a PR. Time from time 
 |----------------|------| ---------------------------------------------- |
 | Your App Here! | 0x10 | http://www.example.com/super-cool-kastle2-firmware |
 | Knoscillator   | 0x3D | https://github.com/ddf/kastle2/releases/tag/knoscillator-v1.0.0 |
-| FX Wizard Plus | 0x7F | (local fork: delay, chorus, phaser, two reverbs, distortion, pitcher) |
+| FX Wizard Plus | 0x7F | (local fork: delay, chorus, phaser, two reverbs, distortion, pitch shifter) |
 | ...            | ...  | ...                                            |
 | ...            | ...  | ...                                            |
 | ...            | ...  | ...                                            |
