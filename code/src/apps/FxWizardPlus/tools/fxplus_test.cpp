@@ -758,114 +758,88 @@ static void TestDistortion(const std::string &demo_dir, const std::vector<double
 }
 
 
-static void TestPhaser(const std::string &demo_dir, const std::vector<double> &melody)
+static void TestNotch(const std::string &demo_dir, const std::vector<double> &melody)
 {
-    std::printf("Phaser\n");
-    Phaser ph;
+    std::printf("Notch filter with drive\n");
+    NotchDrive nd;
 
-    // The all-pass chain alone must not change the level
+    // Response of a sine through the notch (drive 1x, quiet signal so the drive stage stays linear)
+    auto gain_db = [&](double f_notch, float q, double f_sine)
     {
-        ph.Reset();
-        ph.SetRate(0.5f);
-        ph.SetFeedback(0);
-        auto in = Noise(static_cast<size_t>(kFs * 3), -20.0);
+        nd.Reset();
+        nd.SetDrive(256);
+        nd.SetNotch(static_cast<float>(f_notch), static_cast<float>(f_notch), q);
+        auto in = Sine(static_cast<size_t>(kFs * 1.5), f_sine, -26.0);
         std::vector<double> out;
         for (double s : in)
         {
             int32_t l, r;
-            ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+            nd.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
             out.push_back(l);
         }
-        double g = Db(Rms(out, 20000)) - Db(Rms(in, 20000));
-        Check(std::fabs(g) < 0.5, "All-pass chain keeps the level", Fmt("(%.2f dB)", g).c_str());
+        return Db(Rms(out, 22000)) - Db(Rms(in, 22000));
+    };
+
+    for (double f : {60.0, 1000.0, 8000.0})
+    {
+        double g = gain_db(f, 2.f, f);
+        Check(g < -30.0, "Deep notch at the set frequency", Fmt("(%.0f Hz: %.1f dB)", f, g).c_str());
+    }
+    {
+        double lo = gain_db(1000.0, 2.f, 100.0), hi = gain_db(1000.0, 2.f, 10000.0);
+        Check(std::fabs(lo) < 1.0 && std::fabs(hi) < 1.0, "Level unchanged far from the notch",
+              Fmt("(100 Hz %+.2f dB, 10 kHz %+.2f dB)", lo, hi).c_str());
+    }
+    {
+        // A narrow notch leaves a frequency half an octave away nearly untouched, a wide one does not
+        double narrow = gain_db(1000.0, 10.f, 1414.0), wide = gain_db(1000.0, 0.7f, 1414.0);
+        Check(narrow > -1.0 && wide < -4.0, "Width control works", Fmt("(half an octave off: Q 10 %.1f dB, Q 0.7 %.1f dB)", narrow, wide).c_str());
     }
 
-    // Frequency response at two fixed sweep positions (rate 0; the right side is 90 degrees ahead = the sweep's top)
+    // Heavy drive, full scale input: in range, no DC
     {
-        ph.Reset();
-        ph.SetRate(0.f);
-        ph.SetFeedback(0);
-        ph.SetStereoPhase(0x40000000u);
-        auto in = Noise(static_cast<size_t>(kFs * 6), -20.0);
-        std::vector<double> ol, orr, mixl, mixr;
-        for (double s : in)
-        {
-            int32_t l, r;
-            ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
-            mixl.push_back((s + l) * 0.5);
-            mixr.push_back((s + r) * 0.5);
-        }
-        auto notch = [&](const std::vector<double> &mix, double &deepest_db, double &deepest_hz, double &peak_db)
-        {
-            deepest_db = 99;
-            peak_db = -99;
-            deepest_hz = 0;
-            for (double f = 120; f < 9000; f *= 1.04)
-            {
-                double h = Db(Goertzel(mix, f, 22000, 200000) / std::max(1e-9, Goertzel(in, f, 22000, 200000)));
-                if (h < deepest_db)
-                {
-                    deepest_db = h;
-                    deepest_hz = f;
-                }
-                peak_db = std::max(peak_db, h);
-            }
-        };
-        double dl, hl, pl, dr, hr, pr;
-        notch(mixl, dl, hl, pl);
-        notch(mixr, dr, hr, pr);
-        // Noise gives a noisy estimate of the response, so the notch depth is judged generously
-        Check(dl < -12.0, "50/50 mix has a deep notch (sweep centre)", Fmt("(%.1f dB at %.0f Hz)", dl, hl).c_str());
-        Check(dr < -12.0, "50/50 mix has a deep notch (sweep top)", Fmt("(%.1f dB at %.0f Hz)", dr, hr).c_str());
-        Check(hr > hl * 1.5, "Notch moves up when the sweep moves up", Fmt("(%.0f Hz -> %.0f Hz)", hl, hr).c_str());
-        Check(pl < 1.0 && pr < 1.0, "No gain above 0 dB without feedback", Fmt("(peaks %+.1f / %+.1f dB)", pl, pr).c_str());
-
-        // Feedback makes the response peakier
-        ph.Reset();
-        ph.SetFeedback(27000);
-        std::vector<double> fb;
-        for (double s : in)
-        {
-            int32_t l, r;
-            ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
-            fb.push_back((s + l) * 0.5);
-        }
-        double d2, h2, p2;
-        notch(fb, d2, h2, p2);
-        Check(p2 > 6.0 && p2 < 20.0, "Feedback creates resonant peaks", Fmt("(peak %+.1f dB)", p2).c_str());
-    }
-
-    // Full-scale noise with maximum feedback stays bounded
-    {
-        ph.Reset();
-        ph.SetRate(7.f);
-        ph.SetFeedback(32767);
+        nd.Reset();
+        nd.SetDrive(12800);
+        nd.SetNotch(500.f, 500.f, 10.f);
+        auto in = Sine(static_cast<size_t>(kFs * 1.0), 110.0, 0.0);
+        std::vector<double> out;
         int32_t peak = 0;
-        std::mt19937 g(5);
-        for (int i = 0; i < 400000; i++)
+        for (double s : in)
         {
-            int32_t a = (g() & 1) ? 32767 : -32768, l, r;
-            ph.Process(a, -a, l, r);
-            peak = std::max({peak, std::abs(l), std::abs(r)});
+            int32_t l, r;
+            nd.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
+            out.push_back(l);
+            peak = std::max(peak, std::abs(l));
         }
-        Check(peak <= 32768, "Maximum feedback with full scale input stays in range");
+        double dc = 0;
+        for (size_t k = 22000; k < out.size(); k++)
+        {
+            dc += out[k];
+        }
+        dc /= (out.size() - 22000);
+        Check(peak <= 32767 && std::fabs(dc) < 100.0, "50x drive at full scale: in range, no DC", Fmt("(peak %.0f, DC %.1f)", peak, dc).c_str());
     }
 
     if (!demo_dir.empty())
     {
-        for (auto [name, rate, fb] : {std::tuple{"phaser_slow", 0.2f, 12000}, std::tuple{"phaser_resonant", 0.6f, 26000}})
+        // Slow sweep of the notch through the melody, light and heavy drive
+        for (auto [name, drive, q] : {std::tuple{"notch_sweep_clean", 256, 1.5f}, std::tuple{"notch_sweep_driven", 4096, 4.f}})
         {
-            ph.Reset();
-            ph.SetRate(rate);
-            ph.SetFeedback(fb);
-            ph.SetStereoPhase(0x40000000u);
+            nd.Reset();
+            nd.SetDrive(drive);
             std::vector<double> ol, orr;
-            for (double s : melody)
+            for (size_t k = 0; k < melody.size(); k++)
             {
+                if (k % 64 == 0)
+                {
+                    double t = static_cast<double>(k) / melody.size();
+                    float hz = static_cast<float>(80.0 * std::pow(100.0, 0.5 - 0.5 * std::cos(2 * M_PI * t)));
+                    nd.SetNotch(hz, hz, q);
+                }
                 int32_t l, r;
-                ph.Process(static_cast<int32_t>(s), static_cast<int32_t>(s), l, r);
-                ol.push_back((s + l) * 0.5);
-                orr.push_back((s + r) * 0.5);
+                nd.Process(static_cast<int32_t>(melody[k]), static_cast<int32_t>(melody[k]), l, r);
+                ol.push_back(l);
+                orr.push_back(r);
             }
             WriteWav(demo_dir + "/" + name + ".wav", ol, orr);
         }
@@ -1047,7 +1021,7 @@ static void Stress()
     PitchShifter ps;
     Distortion dl, dr;
     PlateReverb plate;
-    Phaser phaser;
+    NotchDrive notch;
     std::mt19937 g(42);
     auto rnd = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(g); };
 
@@ -1060,7 +1034,7 @@ static void Stress()
         ch.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
         ps.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
         plate.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
-        phaser.Reset();
+        notch.Reset();
         for (size_t i = 0; i < 30000; i++)
         {
             if (i % 997 == 0)
@@ -1075,9 +1049,8 @@ static void Stress()
                 plate.SetDecay(static_cast<float>(rnd(0.0, 40.0)));
                 plate.SetDamping(static_cast<int32_t>(rnd(-1000, 40000)));
                 plate.SetPreDelay(static_cast<size_t>(rnd(0, 6000)));
-                phaser.SetRate(static_cast<float>(rnd(0.0, 30.0)));
-                phaser.SetFeedback(static_cast<int32_t>(rnd(-1000, 40000)));
-                phaser.SetStereoPhase(static_cast<uint32_t>(g()));
+                notch.SetDrive(static_cast<int32_t>(rnd(-100, 40000)));
+                notch.SetNotch(static_cast<float>(rnd(-100, 30000)), static_cast<float>(rnd(-100, 30000)), static_cast<float>(rnd(0.0, 20.0)));
                 for (auto *x : {&dl, &dr})
                 {
                     x->SetDrive(static_cast<int32_t>(rnd(-100, 40000)));
@@ -1107,7 +1080,7 @@ static void Stress()
                 plate.Process(a, b, l, r);
                 break;
             case 5:
-                phaser.Process(a, b, l, r);
+                notch.Process(a, b, l, r);
                 break;
             }
             peak = std::max({peak, std::abs(l), std::abs(r)});
@@ -1129,7 +1102,7 @@ int main(int argc, char **argv)
     TestChorus(demo, melody);
     TestPitch(demo, melody);
     TestDistortion(demo, melody);
-    TestPhaser(demo, melody);
+    TestNotch(demo, melody);
     TestPlate(demo, melody);
     Stress();
     std::printf("\n%s (%d failed)\n", g_fail ? "FAILURES" : "ALL TESTS PASSED", g_fail);

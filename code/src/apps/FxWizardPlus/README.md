@@ -1,18 +1,18 @@
 # Kastle 2 FX Wizard Plus
 
-A seven-effect variant of the Bastl FX Wizard: **delay, chorus, phaser, reverb (hall), reverb (plate), distortion
-and pitch shifter**. Delay is the stock FX Wizard mode, the other six are new. The stock Flanger, Freezer, Panner,
+A seven-effect variant of the Bastl FX Wizard: **delay, reverb (hall), reverb (plate), chorus, notch filter with
+drive, pitch shifter and distortion**. Delay is the stock FX Wizard mode, the other six are new. The stock Flanger, Freezer, Panner,
 Crusher, Slicer, Replayer, Pitcher and Shifter were removed.
 
 | # | Mode | LED | Time | Feedback | Amount | Stereo (shift layer) |
 |---|------|-----|------|----------|--------|----------------------|
-| 1 | Delay | green | as in FX Wizard | | | |
-| 2 | **Chorus** | cyan | LFO rate, 0.06 - 9 Hz | feedback (as in the stock modes) | depth and wet level | left/right LFO phase (width) |
-| 3 | **Phaser** | orange | LFO rate, 0.03 - 8 Hz | resonance | dry/wet (full = 1:1, deepest notches) | left/right LFO phase |
-| 4 | **Reverb (hall)** | purple | decay time, 0.3 - 30 s | damping: left = bright, right = dark | wet level | pre-delay, 0 - 75 ms |
-| 5 | **Reverb (plate)** | blue | decay time, 0.3 - 30 s | damping: left = bright, right = dark | wet level | pre-delay, 0 - 75 ms |
-| 6 | **Distortion** | yellow | drive, 1x - 100x | tone: left = bright, right = dark | dry/wet | asymmetry (even harmonics) |
-| 7 | **Pitch shifter** | indigo | pitch, -12 .. +12 semitones, detents at whole semitones | feedback (cascading shifts) | dry/wet | left/right detune, up to 40 cents |
+| 1 | Delay | green | delay time: left = shortest, right = longest (reversed from the stock FX Wizard) | as in FX Wizard | as in FX Wizard | as in FX Wizard |
+| 2 | **Reverb (hall)** | purple | decay time, 0.3 - 30 s | damping: left = bright, right = dark | wet level | pre-delay, 0 - 75 ms |
+| 3 | **Reverb (plate)** | blue | decay time, 0.3 - 30 s | damping: left = bright, right = dark | wet level | pre-delay, 0 - 75 ms |
+| 4 | **Chorus** | cyan | LFO rate, 0.06 - 9 Hz | feedback (as in the stock modes) | depth and wet level | left/right LFO phase (width) |
+| 5 | **Notch filter** | orange | notch frequency, 40 Hz - 12 kHz | drive, 1x - 50x (ahead of the notch) | dry/wet (full = notched signal only) | notch width: left = wide, right = narrow |
+| 6 | **Pitch shifter** | indigo | pitch in steps: -12, -7, -5, -2, 0, +2, +5, +7, +12 semitones | feedback (cascading shifts) | dry/wet | left/right detune, up to 40 cents |
+| 7 | **Distortion** | yellow | drive, 1x - 100x | tone: left = bright, right = dark | dry/wet | asymmetry (even harmonics) |
 
 For the new modes, Amount at zero is a clean bypass. The DJ filter (shift + Feedback knob) works in every mode.
 A trigger restarts the chorus LFO; in the other modes it only blinks the LEDs.
@@ -24,7 +24,12 @@ About the two reverbs:
   and smoother, with a slow shimmer from the modulation. The stereo image is wider.
 - The dark end of the damping range is quieter than the bright end in both.
 
-The pitch shifter is a two-tap crossfaded delay line ("harmonizer" style): clean pitch steps, with the slow flutter
+The notch filter is a drive stage (the distortion's clipper with its level compensation, tone fully open) followed by
+a state variable notch. The notch is deep (more than 40 dB at the set frequency) and also removes the harmonics the drive
+adds around it.
+
+The pitch shifter's Time knob is split into nine equal zones, one per step, so it only lands on octaves, fifths, fourths
+and whole tones. CV on Time jumps between the same steps. The pitch shifter is a two-tap crossfaded delay line ("harmonizer" style): clean pitch steps, with the slow flutter
 typical of that design, and up to 93 ms of latency on the wet signal. At 0 semitones with no detune it passes the input
 through unchanged. Pushing Amount to the end gives the shifted signal alone; somewhere in the middle is the classic
 harmonizer blend.
@@ -40,8 +45,8 @@ The UF2 ends up in `code/build/output`. It uses app ID `0x7F` (community range),
 EEPROM and never touches the settings of the stock FX Wizard (`0xB1`). Calibration is stored separately and is not
 affected. If you distribute this, register an ID in [APP_LIST.md](../../../../APP_LIST.md) first.
 
-Size (Release, Arm GNU Toolchain 14.2.Rel1, Pico SDK 2.3.1), compared with the stock FX Wizard: flash 427,716 B
-(81.6% of 512 KB, stock 431,828 B), static RAM 23,200 B (stock 23,028 B), FASTCODE 9,200 B of 16 KB.
+Size (Release, Arm GNU Toolchain 14.2.Rel1, Pico SDK 2.3.1), compared with the stock FX Wizard: flash 429,484 B
+(81.9% of 512 KB, stock 431,828 B), static RAM 23,216 B (stock 23,028 B), FASTCODE 9,208 B of 16 KB.
 
 Outside the Nix shell, with Arm's own toolchain package, the link can fail with `undefined reference to __dso_handle`
 (it happens with the stock FX Wizard too: the link uses `-nostartfiles`). Adding
@@ -52,7 +57,7 @@ Outside the Nix shell, with Arm's own toolchain package, the link can fail with 
 The RP2040 has no spare RAM: the stock FX Wizard already leaves only about 6 kB of the 240 kB heap free after its delay
 lines. The chorus and both reverbs therefore **borrow the memory of the long delay lines**, which is idle while they are
 active (`AdvancedDynamicDelayLine::GetBuffer()`). The memory is wiped when entering one of these modes and again when
-leaving to Delay or Distortion. Phaser and distortion need no buffer.
+leaving to Delay, Notch filter or Distortion. The notch filter and distortion need no buffer.
 
 Words used per channel, out of 50,800: hall 17k + 13k, plate 21k + 16k, chorus 2k + 2k, pitch shifter 8k + 8k.
 
@@ -72,6 +77,5 @@ clang++ -std=c++20 -O1 -g -fsanitize=address,undefined -I.. fxplus_test.cpp -o f
 ./fxplus_test demos/     # also render WAV demos into demos/ (directory must exist)
 ```
 
-This checks, among others: reverb RT60 against the requested decay, tails decaying to silence, phaser notch depth and
-movement, pitch accuracy and clean unity, distortion level compensation and DC offset, and that nothing leaves the 16 bit range or touches memory
+This checks, among others: reverb RT60 against the requested decay, tails decaying to silence, notch depth and width, pitch accuracy and clean unity, distortion level compensation and DC offset, and that nothing leaves the 16 bit range or touches memory
 outside its buffers. It does not check the app glue, the CPU load or how it sounds on the hardware.

@@ -65,9 +65,10 @@ static constexpr auto kMapDelayFeedback = MapDef<int32_t, 3>{
     {pot(0.0f), pot(0.3f), pot(1.0f)},
     {q15(0.0f), q15(0.2f), q15(1.0f)}};
 
+// Shortest fully left, longest fully right (the stock FX Wizard is the other way round)
 static constexpr auto kMapDelayLength = MapDef<int32_t, 5>{
-    {pot(0.0f), pot(0.45f), pot(0.65f), pot(0.85f), pot(1.0f)},
-    {50799, 12000, 7000, 4000, 100}};
+    {pot(0.0f), pot(0.15f), pot(0.35f), pot(0.55f), pot(1.0f)},
+    {100, 4000, 7000, 12000, 50799}};
 
 static constexpr auto kMapDelayStereo = MapDef<int32_t, 3>{
     {pot(0.0f), pot(0.5f), pot(1.0f)},
@@ -224,14 +225,16 @@ static constexpr auto kMapDistortionDry = MapDef<int32_t, 2>{
     {q15(1.0f), q15(0.0f)}};
 
 // --- PITCH SHIFTER ---
-// TIME: pitch, -12 .. +12 semitones with detents at whole semitones. FEEDBACK: global feedback (cascading shifts).
+// TIME: pitch, in the steps of kPitchShifterSteps. FEEDBACK: global feedback (cascading shifts).
 // AMOUNT: dry/wet. STEREO: detune between left and right.
 static constexpr auto kMapPitchShifterGlobalDryWet = MapDef<int32_t, 3>{
     {pot(0.0f), pot(0.1f), pot(1.0f)},
     {q15(0.0f), q15(1.0f), q15(1.0f)}};
 
-static constexpr float kPitchShifterRangeSemitones = 12.f; ///< Time knob covers +- this
-static constexpr float kPitchShifterDetentWidth = 0.25f;   ///< Within this of a whole semitone the pitch snaps to it
+/// The Time knob is split into equal zones, one per step (semitones): octaves, fifths, fourths and whole tones
+static constexpr auto kPitchShifterSteps = std::array<int32_t, 9>{-12, -7, -5, -2, 0, 2, 5, 7, 12};
+/// The knob has to move this far past a zone border before the step changes (pot units, avoids flicker at the border)
+static constexpr int32_t kPitchShifterStepHysteresis = 40;
 
 static constexpr auto kMapPitchShifterDetune = MapDef<float, 2>{
     {pot(0.0f), pot(1.0f)},
@@ -253,28 +256,32 @@ static constexpr auto kMapPitchShifterGlobalFeedbackVolume = MapDef<int32_t, 4>{
     {pot(0.0f), pot(0.15f), pot(0.5f), pot(1.0f)},
     {q15(0.0f), q15(0.03f), q15(0.06f), q15(0.1f)}};
 
-// --- PHASER ---
-// TIME: LFO rate. FEEDBACK: resonance. AMOUNT: dry/wet (full amount is 1:1, which gives the deepest notches).
-// STEREO: left/right LFO phase.
-static constexpr auto kMapPhaserGlobalDryWet = MapDef<int32_t, 3>{
+// --- NOTCH FILTER WITH DRIVE ---
+// TIME: notch frequency. FEEDBACK: drive (ahead of the notch). AMOUNT: dry/wet (full = notched signal only).
+// STEREO: notch width, fully left = wide, fully right = narrow.
+static constexpr auto kMapNotchGlobalDryWet = MapDef<int32_t, 3>{
     {pot(0.0f), pot(0.1f), pot(1.0f)},
     {q15(0.0f), q15(1.0f), q15(1.0f)}};
 
-static constexpr auto kMapPhaserRate = MapDef<float, 5>{
-    {pot(0.0f), pot(0.3f), pot(0.6f), pot(0.85f), pot(1.0f)},
-    {0.03f, 0.15f, 0.6f, 2.5f, 8.0f}}; // Hz
+static constexpr auto kMapNotchFrequency = MapDef<float, 5>{
+    {pot(0.0f), pot(0.25f), pot(0.5f), pot(0.75f), pot(1.0f)},
+    {40.f, 160.f, 640.f, 2560.f, 12000.f}}; // Hz, about two octaves per quarter turn
 
-static constexpr auto kMapPhaserFeedback = MapDef<int32_t, 3>{
+static constexpr auto kMapNotchQ = MapDef<float, 3>{
     {pot(0.0f), pot(0.5f), pot(1.0f)},
-    {q15(0.0f), q15(0.37f), q15(0.82f)}};
+    {0.7f, 2.0f, 10.0f}};
 
-static constexpr auto kMapPhaserWet = MapDef<int32_t, 2>{
-    {pot(0.0f), pot(1.0f)},
-    {q15(0.0f), q15(0.5f)}};
+static constexpr auto kMapNotchDrive = MapDef<int32_t, 4>{
+    {pot(0.0f), pot(0.4f), pot(0.75f), pot(1.0f)},
+    {256, 1024, 4096, 12800}}; // in 1/256, so 1x, 4x, 16x, 50x
 
-static constexpr auto kMapPhaserDry = MapDef<int32_t, 2>{
+static constexpr auto kMapNotchWet = MapDef<int32_t, 2>{
     {pot(0.0f), pot(1.0f)},
-    {q15(1.0f), q15(0.5f)}};
+    {q15(0.0f), q15(1.0f)}};
+
+static constexpr auto kMapNotchDry = MapDef<int32_t, 2>{
+    {pot(0.0f), pot(1.0f)},
+    {q15(1.0f), q15(0.0f)}};
 
 // --- SEQUENCER
 static constexpr size_t kFxSequencerLength = 8; ///< See Sequencer.hpp for the max length

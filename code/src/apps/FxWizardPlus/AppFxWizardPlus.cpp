@@ -139,7 +139,7 @@ void AppFxWizardPlus::Init()
     chorus_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     plate_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     pitch_shifter_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
-    phaser_.Reset();
+    notch_.Reset();
     delay_pool_dirty_ = false; // the delay lines start out zeroed
     delay_compressor_.Init(SAMPLE_RATE / delay_peak_counter_max_);
     delay_compressor_.SetAttackTime(50.f / 1000.f);
@@ -327,8 +327,8 @@ FASTCODE void AppFxWizardPlus::AudioLoop(q15_t *input, q15_t *output, size_t siz
             ModeChorus();
             break;
 
-        case Mode::PHASER:
-            ModePhaser();
+        case Mode::NOTCH:
+            ModeNotch();
             break;
 
         case Mode::REVERB:
@@ -667,17 +667,26 @@ void AppFxWizardPlus::UiLoop()
         chorus_.SetStereoPhase(static_cast<uint32_t>(curve_map(stereo, kMapChorusStereoPhase, MapClamp::TRUE)) << 17);
         break;
 
-    case Mode::PHASER:
-        SetDryWet(curve_map(dry_wet, kMapPhaserGlobalDryWet));
-        // the phaser has its own resonance, so the global feedback is off
+    case Mode::NOTCH:
+    {
+        SetDryWet(curve_map(dry_wet, kMapNotchGlobalDryWet));
+        // the feedback knob is the drive here, so the global feedback is off
         feedback_delay_ = kNoFeedbackDelay;
         feedback_volume_ = Q15_ZERO;
-        phaser_dry_ = curve_map(dry_wet, kMapPhaserDry);
-        phaser_wet_ = curve_map(dry_wet, kMapPhaserWet);
-        phaser_.SetRate(curve_map(time, kMapPhaserRate, MapClamp::TRUE));
-        phaser_.SetFeedback(curve_map(feedback, kMapPhaserFeedback, MapClamp::TRUE));
-        phaser_.SetStereoPhase(static_cast<uint32_t>(curve_map(stereo, kMapChorusStereoPhase, MapClamp::TRUE)) << 17);
+        notch_dry_ = curve_map(dry_wet, kMapNotchDry);
+        notch_wet_ = curve_map(dry_wet, kMapNotchWet);
+        notch_.SetDrive(curve_map(feedback, kMapNotchDrive, MapClamp::TRUE));
+
+        // The coefficients need tan() (floating point), only recalculate when the knobs really moved
+        if (diff(time, notch_frequency_key_) > 3 || diff(stereo, notch_q_key_) > 12)
+        {
+            notch_frequency_key_ = time;
+            notch_q_key_ = stereo;
+            float hz = curve_map(time, kMapNotchFrequency, MapClamp::TRUE);
+            notch_.SetNotch(hz, hz, curve_map(stereo, kMapNotchQ, MapClamp::TRUE));
+        }
         break;
+    }
 
     case Mode::PLATE:
     {
@@ -712,18 +721,21 @@ void AppFxWizardPlus::UiLoop()
         pitch_shifter_dry_ = curve_map(dry_wet, kMapPitchShifterDry);
         pitch_shifter_wet_ = curve_map(dry_wet, kMapPitchShifterWet);
 
-        // Time knob: +- kPitchShifterRangeSemitones, snapping to whole semitones near them
-        float semitones = (static_cast<float>(time) / static_cast<float>(POT_MAX) * 2.f - 1.f) * kPitchShifterRangeSemitones;
-        float nearest = static_cast<float>(static_cast<int32_t>(semitones + (semitones >= 0.f ? 0.5f : -0.5f)));
-        if (semitones - nearest < kPitchShifterDetentWidth && nearest - semitones < kPitchShifterDetentWidth)
+        // Time knob: equal zones, one per step of kPitchShifterSteps, with some hysteresis at the borders
+        constexpr int32_t steps = static_cast<int32_t>(kPitchShifterSteps.size());
+        constexpr int32_t zone = (POT_MAX + 1 + steps - 1) / steps;
+        int32_t step = constrain(time / zone, 0, steps - 1);
+        if (pitch_shifter_step_ < 0 ||
+            (step > pitch_shifter_step_ && time >= (pitch_shifter_step_ + 1) * zone + kPitchShifterStepHysteresis) ||
+            (step < pitch_shifter_step_ && time < pitch_shifter_step_ * zone - kPitchShifterStepHysteresis))
         {
-            semitones = nearest;
+            pitch_shifter_step_ = step;
         }
+        int32_t semitones_key = kPitchShifterSteps[pitch_shifter_step_];
+        float semitones = static_cast<float>(semitones_key);
         float detune = curve_map(stereo, kMapPitchShifterDetune, MapClamp::TRUE);
 
-        // Changing the pitch is expensive (floating point exp2), only do it when the knobs really moved:
-        // 1/16 semitone and 2 cent resolution
-        int32_t semitones_key = static_cast<int32_t>(semitones * 16.f + (semitones >= 0.f ? 0.5f : -0.5f));
+        // Changing the pitch is expensive (floating point exp2), only do it when something changed (2 cent resolution)
         int32_t detune_key = static_cast<int32_t>(detune * 0.5f);
         if (semitones_key != pitch_shifter_semitones_key_ || detune_key != pitch_shifter_detune_key_)
         {
@@ -811,8 +823,8 @@ void AppFxWizardPlus::ModeInit()
     case Mode::CHORUS:
         ModeChorusInit();
         break;
-    case Mode::PHASER:
-        ModePhaserInit();
+    case Mode::NOTCH:
+        ModeNotchInit();
         break;
     case Mode::PLATE:
         ModePlateInit();
@@ -963,18 +975,21 @@ void AppFxWizardPlus::ModeReverb()
     output_right_ = q15_add(q15_mult(input_right_, reverb_dry_), q15_mult(wet_right, reverb_wet_));
 }
 
-void AppFxWizardPlus::ModePhaserInit()
+void AppFxWizardPlus::ModeNotchInit()
 {
-    phaser_.Reset();
+    notch_.Reset();
+    // make UiLoop send the coefficients again
+    notch_frequency_key_ = INT32_MIN / 2;
+    notch_q_key_ = INT32_MIN / 2;
 }
 
-void AppFxWizardPlus::ModePhaser()
+void AppFxWizardPlus::ModeNotch()
 {
     int32_t wet_left, wet_right;
-    phaser_.Process(input_left_, input_right_, wet_left, wet_right);
+    notch_.Process(input_left_, input_right_, wet_left, wet_right);
 
-    output_left_ = q15_add(q15_mult(input_left_, phaser_dry_), q15_mult(wet_left, phaser_wet_));
-    output_right_ = q15_add(q15_mult(input_right_, phaser_dry_), q15_mult(wet_right, phaser_wet_));
+    output_left_ = q15_add(q15_mult(input_left_, notch_dry_), q15_mult(wet_left, notch_wet_));
+    output_right_ = q15_add(q15_mult(input_right_, notch_dry_), q15_mult(wet_right, notch_wet_));
 }
 
 void AppFxWizardPlus::ModePlateInit()

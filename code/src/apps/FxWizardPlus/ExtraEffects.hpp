@@ -24,7 +24,7 @@ SOFTWARE.
 
 /**
  * @file ExtraEffects.hpp
- * @brief Reverb, chorus, pitch shifter and distortion for FX Wizard Plus.
+ * @brief Reverb, chorus, pitch shifter, distortion and notch filter for FX Wizard Plus.
  *
  * These classes are deliberately free of any Pico SDK / Kastle 2 dependencies (plain <cstdint> only),
  * so they can be compiled and tested on a PC. See tools/fxplus_test.cpp.
@@ -680,109 +680,6 @@ private:
 };
 
 /* ------------------------------------------------------------------------------------------------
- *  PHASER
- * ---------------------------------------------------------------------------------------------- */
-
-/**
- * @brief First order all-pass coefficients for a sweep of the break frequency from 100 Hz to 6.4 kHz
- *        (exponential, 65 points). a = (tan(pi f / fs) - 1) / (tan(pi f / fs) + 1), q15 (negative for low frequencies).
- */
-static constexpr int16_t kPhaserCoefficients[65] = {
-    -32303, -32272, -32239, -32204, -32167, -32127, -32084, -32039, -31990, -31939, -31884, -31825, -31763,
-    -31697, -31626, -31551, -31471, -31385, -31294, -31198, -31095, -30986, -30869, -30746, -30614, -30475,
-    -30326, -30169, -30002, -29824, -29635, -29435, -29223, -28998, -28760, -28508, -28240, -27958, -27659,
-    -27342, -27008, -26655, -26282, -25889, -25474, -25038, -24577, -24093, -23584, -23048, -22486, -21896,
-    -21276, -20627, -19946, -19234, -18488, -17708, -16892, -16040, -15149, -14218, -13245, -12229, -11167
-};
-
-/**
- * @class Phaser
- * @brief Six stage all-pass phaser with feedback and a stereo LFO offset. Needs no buffers.
- *
- * The output is the all-pass chain only (100% wet, same level as the input); mix it with the dry signal 1:1
- * to get the notches. The sweep covers 10% - 90% of the coefficient table, about 150 Hz to 4.2 kHz.
- */
-class Phaser
-{
-public:
-    static constexpr int kStages = 6;
-
-    void Reset()
-    {
-        for (auto &c : channel_)
-        {
-            for (int i = 0; i < kStages; i++)
-            {
-                c.x1[i] = 0;
-                c.y1[i] = 0;
-            }
-            c.last = 0;
-        }
-        phase_ = 0;
-    }
-
-    /** @brief LFO rate in Hz, call from the UI loop only (floating point). */
-    void SetRate(float hz)
-    {
-        inc_ = static_cast<uint32_t>(hz / 44000.f * 4294967296.f);
-    }
-
-    /** @brief Feedback (resonance), q15. Limited to 0.85, which keeps the loop stable. */
-    void SetFeedback(int32_t q15)
-    {
-        feedback_ = q15 < 0 ? 0 : (q15 > 27853 ? 27853 : q15);
-    }
-
-    /** @brief Phase offset of the right LFO as a 32-bit phase (0x80000000 = opposite). */
-    void SetStereoPhase(uint32_t phase_offset)
-    {
-        stereo_phase_ = phase_offset;
-    }
-
-    inline void Process(int32_t in_l, int32_t in_r, int32_t &out_l, int32_t &out_r)
-    {
-        out_l = Run(channel_[0], phase_, in_l);
-        out_r = Run(channel_[1], phase_ + stereo_phase_, in_r);
-        phase_ += inc_;
-    }
-
-private:
-    struct Channel
-    {
-        int32_t x1[kStages] = {0};
-        int32_t y1[kStages] = {0};
-        int32_t last = 0;
-    };
-
-    inline int32_t Run(Channel &c, uint32_t phase, int32_t in)
-    {
-        // all-pass coefficient for this moment of the sweep (same for all stages)
-        int32_t pos = 16384 + ((LfoSine(phase) * 13107) >> 15); // 0.5 +- 0.4, q15
-        int32_t idx = pos >> 9;
-        int32_t frac = pos & 511;
-        int32_t a = kPhaserCoefficients[idx] + (((kPhaserCoefficients[idx + 1] - kPhaserCoefficients[idx]) * frac) >> 9);
-
-        int32_t x = Sat16(in + ((c.last * feedback_ + 0x4000) >> 15));
-        for (int s = 0; s < kStages; s++)
-        {
-            // y[n] = a * (x[n] - y[n-1]) + x[n-1]
-            int32_t y = Sat16(((a * (x - c.y1[s]) + 0x4000) >> 15) + c.x1[s]);
-            c.x1[s] = x;
-            c.y1[s] = y;
-            x = y;
-        }
-        c.last = x;
-        return x;
-    }
-
-    Channel channel_[2];
-    uint32_t phase_ = 0;
-    uint32_t inc_ = 0;
-    uint32_t stereo_phase_ = 0;
-    int32_t feedback_ = 0;
-};
-
-/* ------------------------------------------------------------------------------------------------
  *  PLATE REVERB
  * ---------------------------------------------------------------------------------------------- */
 
@@ -1275,6 +1172,114 @@ private:
     int32_t dc_x_ = 0;
     int32_t dc_y_ = 0;
     int32_t tone_ = 0;
+};
+
+/* ------------------------------------------------------------------------------------------------
+ *  NOTCH FILTER WITH DRIVE
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * @class NotchDrive
+ * @brief Stereo drive (the Distortion stage, tone fully open) into a notch filter. Needs no buffers.
+ *
+ * The notch is a trapezoidal (TPT / "Simper") state variable filter: it stays stable and keeps its shape at any
+ * frequency, also while the frequency is moving. The drive comes first, so the notch also carves out the harmonics
+ * the drive adds. Fixed point: the filter states carry 8 extra fractional bits, coefficients are q28 (64 bit products).
+ * The output is 100% wet at the input level; mix it with the dry signal as needed.
+ */
+class NotchDrive
+{
+public:
+    static constexpr float kMinHz = 20.f;
+    static constexpr float kMaxHz = 18000.f;
+    static constexpr float kMinQ = 0.3f;
+    static constexpr float kMaxQ = 12.f;
+
+    void Reset()
+    {
+        for (auto &c : channel_)
+        {
+            c.ic1 = 0;
+            c.ic2 = 0;
+            c.drive.Reset();
+            c.drive.SetTone(32767);
+        }
+    }
+
+    /** @brief Drive in 1/256 (256 = 1x), see Distortion::SetDrive. The level is compensated. */
+    void SetDrive(int32_t gain_q8)
+    {
+        for (auto &c : channel_)
+        {
+            c.drive.SetDrive(gain_q8);
+        }
+    }
+
+    /**
+     * @brief Notch frequency and Q (higher Q = narrower notch). Call from the UI loop only (floating point).
+     * @param hz_right Frequency of the right channel (can differ from the left for a stereo spread).
+     */
+    void SetNotch(float hz_left, float hz_right, float q)
+    {
+        q = q < kMinQ ? kMinQ : (q > kMaxQ ? kMaxQ : q);
+        SetChannel(channel_[0], hz_left, q);
+        SetChannel(channel_[1], hz_right, q);
+    }
+
+    inline void Process(int32_t in_l, int32_t in_r, int32_t &out_l, int32_t &out_r)
+    {
+        out_l = Run(channel_[0], in_l);
+        out_r = Run(channel_[1], in_r);
+    }
+
+private:
+    static constexpr int kCoefBits = 28;
+    static constexpr int kStateBits = 8;
+
+    struct Channel
+    {
+        int32_t a1 = 1 << kCoefBits;
+        int32_t a2 = 0;
+        int32_t a3 = 0;
+        int32_t k = 1 << kCoefBits;
+        int32_t ic1 = 0;
+        int32_t ic2 = 0;
+        Distortion drive;
+    };
+
+    static void SetChannel(Channel &c, float hz, float q)
+    {
+        hz = hz < kMinHz ? kMinHz : (hz > kMaxHz ? kMaxHz : hz);
+        float g = std::tan(3.14159265f * hz / 44000.f);
+        float k = 1.f / q;
+        float a1 = 1.f / (1.f + g * (g + k));
+        float a2 = g * a1;
+        float a3 = g * a2;
+        constexpr float s = static_cast<float>(1 << kCoefBits);
+        c.a1 = static_cast<int32_t>(a1 * s);
+        c.a2 = static_cast<int32_t>(a2 * s);
+        c.a3 = static_cast<int32_t>(a3 * s);
+        c.k = static_cast<int32_t>(k * s);
+    }
+
+    static inline int32_t Mul(int32_t coef, int32_t x)
+    {
+        return static_cast<int32_t>((static_cast<int64_t>(coef) * x) >> kCoefBits);
+    }
+
+    static inline int32_t Run(Channel &c, int32_t in)
+    {
+        int32_t v0 = c.drive.Process(in) * (1 << kStateBits);
+        int32_t v3 = v0 - c.ic2;
+        int32_t v1 = static_cast<int32_t>((static_cast<int64_t>(c.a1) * c.ic1 + static_cast<int64_t>(c.a2) * v3) >> kCoefBits);
+        int32_t v2 = c.ic2 + static_cast<int32_t>((static_cast<int64_t>(c.a2) * c.ic1 + static_cast<int64_t>(c.a3) * v3) >> kCoefBits);
+        c.ic1 = 2 * v1 - c.ic1;
+        c.ic2 = 2 * v2 - c.ic2;
+        int32_t notch = v0 - Mul(c.k, v1);
+        return Sat16((notch + (1 << (kStateBits - 1))) >> kStateBits);
+    }
+
+    Channel channel_[2];
 };
 
 } // namespace kastle2::fxplus

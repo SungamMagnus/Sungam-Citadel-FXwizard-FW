@@ -59,8 +59,8 @@ namespace kastle2
 /**
  * @class AppFxWizardPlus
  * @ingroup apps
- * @brief FX Wizard variant with seven effects: delay, chorus, phaser, reverb (hall), reverb (plate),
- *        distortion and pitch shifter. Based on the Bastl Instruments FX Wizard (Marek Mach, Vaclav Mach, 2024).
+ * @brief FX Wizard variant with seven effects: delay, reverb (hall), reverb (plate), chorus,
+ *        notch filter with drive, pitch shifter and distortion. Based on the Bastl Instruments FX Wizard (Marek Mach, Vaclav Mach, 2024).
  *
  * Delay is the stock FX Wizard mode, the others are new, see ExtraEffects.hpp for their DSP.
  * The stock Flanger, Freezer, Panner, Crusher, Slicer, Replayer, Pitcher and Shifter were removed.
@@ -75,13 +75,13 @@ public:
      */
     enum class Mode
     {
-        DELAY,      // GREEN
-        CHORUS,     // CYAN
-        PHASER,     // ORANGE
-        REVERB,     // PURPLE, comb based hall / room
-        PLATE,      // BLUE, Dattorro plate
-        DISTORTION, // YELLOW
+        DELAY,         // GREEN
+        REVERB,        // PURPLE, comb based hall / room
+        PLATE,         // BLUE, Dattorro plate
+        CHORUS,        // CYAN
+        NOTCH,         // ORANGE, notch filter with drive
         PITCH_SHIFTER, // INDIGO, harmonizer style
+        DISTORTION,    // YELLOW
         COUNT,
     };
 
@@ -90,12 +90,12 @@ public:
      */
     static inline const EnumArray<Mode, uint32_t> kLedColors = {
         WS2812::GREEN,
-        WS2812::CYAN,
-        WS2812::ORANGE,
         WS2812::PURPLE,
         WS2812::BLUE,
-        WS2812::YELLOW,
+        WS2812::CYAN,
+        WS2812::ORANGE,
         WS2812::INDIGO,
+        WS2812::YELLOW,
     };
 
     /**
@@ -272,13 +272,16 @@ private:
     fxplus::PitchShifter pitch_shifter_;
     q15_t pitch_shifter_dry_ = Q15_ZERO;
     q15_t pitch_shifter_wet_ = Q15_MAX;
-    int32_t pitch_shifter_semitones_key_ = INT32_MIN; // knob position in 1/16 semitones, for detecting changes
+    int32_t pitch_shifter_step_ = -1; // index into kPitchShifterSteps, -1 = not set yet
+    int32_t pitch_shifter_semitones_key_ = INT32_MIN; // for detecting changes
     int32_t pitch_shifter_detune_key_ = INT32_MIN;
 
-    // phaser
-    fxplus::Phaser phaser_;
-    q15_t phaser_dry_ = Q15_MAX;
-    q15_t phaser_wet_ = Q15_ZERO;
+    // notch filter with drive
+    fxplus::NotchDrive notch_;
+    q15_t notch_dry_ = Q15_MAX;
+    q15_t notch_wet_ = Q15_ZERO;
+    int32_t notch_frequency_key_ = INT32_MIN / 2; // knob positions, for detecting changes (the coefficients are expensive)
+    int32_t notch_q_key_ = INT32_MIN / 2;
 
     // chorus
     fxplus::Chorus chorus_;
@@ -342,8 +345,8 @@ private:
     void ModeReverb();
     void ModePlateInit();
     void ModePlate();
-    void ModePhaserInit();
-    void ModePhaser();
+    void ModeNotchInit();
+    void ModeNotch();
     void ModeChorusInit();
     void ModeChorus();
     void ModeDistortionInit();
