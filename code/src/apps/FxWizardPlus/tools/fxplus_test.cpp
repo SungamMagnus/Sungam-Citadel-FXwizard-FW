@@ -846,6 +846,171 @@ static void TestNotch(const std::string &demo_dir, const std::vector<double> &me
     }
 }
 
+// Runs left/right input through the mono detector in blocks of 48 sample pairs (as in the app)
+static void RunMono(MonoNormalizer &mn, const std::vector<double> &l, const std::vector<double> &r,
+                    std::vector<double> &ol, std::vector<double> &orr)
+{
+    constexpr size_t kBlock = 48;
+    ol.clear();
+    orr.clear();
+    std::vector<int32_t> buf(2 * kBlock);
+    for (size_t start = 0; start + kBlock <= l.size(); start += kBlock)
+    {
+        for (size_t i = 0; i < kBlock; i++)
+        {
+            buf[2 * i] = static_cast<int32_t>(l[start + i]);
+            buf[2 * i + 1] = static_cast<int32_t>(r[start + i]);
+        }
+        mn.Process(buf.data(), kBlock);
+        for (size_t i = 0; i < kBlock; i++)
+        {
+            ol.push_back(buf[2 * i]);
+            orr.push_back(buf[2 * i + 1]);
+        }
+    }
+}
+
+static double MaxDiff(const std::vector<double> &a, const std::vector<double> &b, size_t from, size_t to)
+{
+    double m = 0;
+    for (size_t i = from; i < to && i < a.size() && i < b.size(); i++)
+    {
+        // the buffers hold integers, the test signals are not rounded: compare the integer parts
+        m = std::max(m, std::fabs(std::trunc(a[i]) - std::trunc(b[i])));
+    }
+    return m;
+}
+
+static void TestMono()
+{
+    std::printf("Mono input detection\n");
+    MonoNormalizer mn;
+    size_t n = static_cast<size_t>(kFs * 1.0);
+    auto sig = Sine(n, 440.0, -20.0);
+    auto other = Sine(n, 660.0, -20.0);
+    std::vector<double> silent(n, 0.0), ol, orr;
+
+    // Mono on the left: the right side gets a copy after about 250 ms, nothing changes before
+    mn.Reset();
+    RunMono(mn, sig, silent, ol, orr);
+    Check(MaxDiff(orr, silent, 0, static_cast<size_t>(kFs * 0.2)) == 0, "Mono left: right untouched for the first 200 ms");
+    Check(MaxDiff(orr, ol, static_cast<size_t>(kFs * 0.3), ol.size()) <= 1, "Mono left: right is a copy of the left after 300 ms");
+    Check(mn.GetState() == MonoNormalizer::State::MONO_LEFT, "Mono left detected");
+    Check(MaxDiff(ol, sig, 0, ol.size()) == 0, "Mono left: left side never changed");
+
+    // No click when the copy fades in: no step larger than the sine's own steps
+    {
+        double sine_step = 0, out_step = 0;
+        for (size_t i = 1; i < orr.size(); i++)
+        {
+            sine_step = std::max(sine_step, std::fabs(sig[i] - sig[i - 1]));
+            out_step = std::max(out_step, std::fabs(orr[i] - orr[i - 1]));
+        }
+        Check(out_step <= sine_step + 2, "Copy fades in without a click", Fmt("(largest step %.0f, the sine itself %.0f)", out_step, sine_step).c_str());
+    }
+
+    // The right side starts playing its own signal: back to stereo quickly, and the right side is the real right input again
+    {
+        std::vector<double> ol2, orr2;
+        RunMono(mn, sig, other, ol2, orr2);
+        Check(mn.GetState() == MonoNormalizer::State::STEREO, "Back to stereo when the right input gets its own signal");
+        Check(MaxDiff(orr2, other, static_cast<size_t>(kFs * 0.1), orr2.size()) == 0, "Right side is the real right input again within 100 ms");
+    }
+
+    // Mono on the right
+    mn.Reset();
+    RunMono(mn, silent, sig, ol, orr);
+    Check(MaxDiff(ol, orr, static_cast<size_t>(kFs * 0.3), ol.size()) <= 1 && mn.GetState() == MonoNormalizer::State::MONO_RIGHT,
+          "Mono right: left is a copy of the right after 300 ms");
+
+    // Real stereo input is never touched
+    mn.Reset();
+    RunMono(mn, sig, other, ol, orr);
+    Check(MaxDiff(ol, sig, 0, ol.size()) == 0 && MaxDiff(orr, other, 0, orr.size()) == 0, "Stereo input passes unchanged");
+
+    // A quiet stereo passage (one side briefly near silence) shorter than 250 ms does not switch to mono
+    {
+        mn.Reset();
+        auto r = other;
+        for (size_t i = static_cast<size_t>(kFs * 0.3); i < static_cast<size_t>(kFs * 0.5); i++)
+        {
+            r[i] = 0;
+        }
+        RunMono(mn, sig, r, ol, orr);
+        Check(MaxDiff(orr, r, 0, orr.size()) == 0, "200 ms of silence on one side of a stereo input does not switch to mono");
+    }
+
+    // Silence on both sides (e.g. the mono source stops) keeps the mono state
+    mn.Reset();
+    RunMono(mn, sig, silent, ol, orr);
+    RunMono(mn, silent, silent, ol, orr);
+    Check(mn.GetState() == MonoNormalizer::State::MONO_LEFT, "Silence on both sides keeps the mono state");
+
+    // A mono input through the detector and then each effect comes out on both sides at a similar level
+    {
+        Pools p;
+        size_t len = static_cast<size_t>(kFs * 2.0);
+        auto in = Noise(len, -20.0);
+        std::vector<double> zero(len, 0.0), nl, nr;
+        mn.Reset();
+        RunMono(mn, in, zero, nl, nr);
+
+        Reverb rv;
+        Chorus ch;
+        PitchShifter ps;
+        PlateReverb pl;
+        NotchDrive nd;
+        Distortion dl, dr;
+        rv.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
+        rv.Clear();
+        rv.SetDecay(2.f);
+        ch.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
+        ch.Clear();
+        ch.SetRate(1.f);
+        ch.SetDepth(200);
+        ch.SetStereoPhase(0x40000000u);
+        ps.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
+        ps.Clear();
+        ps.SetShift(7.f, 20.f);
+        pl.Init(p.l.data(), p.l.size(), p.r.data(), p.r.size());
+        pl.Clear();
+        pl.SetDecay(2.f);
+        nd.Reset();
+        nd.SetDrive(1024);
+        nd.SetNotch(800.f, 800.f, 2.f);
+        dl.Reset();
+        dr.Reset();
+        dl.SetDrive(2048);
+        dr.SetDrive(2048);
+
+        const char *names[] = {"hall", "plate", "chorus", "notch", "pitch shifter", "distortion"};
+        for (int fx = 0; fx < 6; fx++)
+        {
+            std::vector<double> el, er;
+            for (size_t i = 0; i < nl.size(); i++)
+            {
+                int32_t a = static_cast<int32_t>(nl[i]), b = static_cast<int32_t>(nr[i]), l = 0, r = 0;
+                switch (fx)
+                {
+                case 0: rv.Process(a, b, l, r); break;
+                case 1: pl.Process(a, b, l, r); break;
+                case 2: ch.Process(a, b, l, r); break;
+                case 3: nd.Process(a, b, l, r); break;
+                case 4: ps.Process(a, b, l, r); break;
+                case 5: l = dl.Process(a); r = dr.Process(b); break;
+                }
+                el.push_back(l);
+                er.push_back(r);
+            }
+            size_t from = static_cast<size_t>(kFs * 0.6);
+            double d = Db(Rms(er, from)) - Db(Rms(el, from));
+            char detail[100];
+            std::snprintf(detail, sizeof detail, "(%s: right vs left %+.1f dB, left %.1f dBFS)", names[fx], d, Db(Rms(el, from)));
+            Check(std::fabs(d) < 3.0 && Rms(el, from) > 0.01, "Mono input plays on both sides at a similar level", detail);
+        }
+    }
+}
+
 static void TestPlate(const std::string &demo_dir, const std::vector<double> &melody)
 {
     std::printf("Plate reverb\n");
@@ -1103,6 +1268,7 @@ int main(int argc, char **argv)
     TestPitch(demo, melody);
     TestDistortion(demo, melody);
     TestNotch(demo, melody);
+    TestMono();
     TestPlate(demo, melody);
     Stress();
     std::printf("\n%s (%d failed)\n", g_fail ? "FAILURES" : "ALL TESTS PASSED", g_fail);

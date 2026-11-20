@@ -24,7 +24,7 @@ SOFTWARE.
 
 /**
  * @file ExtraEffects.hpp
- * @brief Reverb, chorus, pitch shifter, distortion and notch filter for FX Wizard Plus.
+ * @brief Reverb, chorus, pitch shifter, distortion, notch filter and mono input detection for FX Wizard Plus.
  *
  * These classes are deliberately free of any Pico SDK / Kastle 2 dependencies (plain <cstdint> only),
  * so they can be compiled and tested on a PC. See tools/fxplus_test.cpp.
@@ -1280,6 +1280,124 @@ private:
     }
 
     Channel channel_[2];
+};
+
+/* ------------------------------------------------------------------------------------------------
+ *  MONO INPUT DETECTION
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * @class MonoNormalizer
+ * @brief Makes a mono input play on both sides: when one input channel has signal and the other stays silent,
+ *        the silent one gets a copy of the active one. Works on the interleaved input buffer in place, before any
+ *        effect (and the dry path) sees it.
+ *
+ * - Mono: one side above kOnLevel while the other stays below kOffLevel for kMonoSamples (about 250 ms).
+ * - Back to stereo: both sides above kOnLevel for kStereoSamples (about 50 ms).
+ * - Anything in between (both quiet, a fade-out...) keeps the current state.
+ * The copy fades in and out over about 10 ms, so switching does not click. Integer only, cheap enough for the audio loop.
+ */
+class MonoNormalizer
+{
+public:
+    enum class State
+    {
+        STEREO,
+        MONO_LEFT,  ///< left input copied to the right
+        MONO_RIGHT, ///< right input copied to the left
+    };
+
+    static constexpr int32_t kOnLevel = 400;   ///< block peak, about -38 dBFS
+    static constexpr int32_t kOffLevel = 100;  ///< block peak, about -50 dBFS (an unplugged input's noise is far below)
+    static constexpr uint32_t kMonoSamples = 11000;  ///< 250 ms
+    static constexpr uint32_t kStereoSamples = 2200; ///< 50 ms
+    static constexpr int32_t kFadeStep = 75;         ///< q15 per sample, about 10 ms for a full fade
+
+    void Reset()
+    {
+        state_ = State::STEREO;
+        source_ = State::MONO_LEFT;
+        mix_ = 0;
+        mono_left_count_ = 0;
+        mono_right_count_ = 0;
+        stereo_count_ = 0;
+    }
+
+    State GetState() const
+    {
+        return state_;
+    }
+
+    /**
+     * @param buffer Interleaved stereo samples in the 16 bit range (L, R, L, R...), changed in place.
+     * @param frames Number of sample pairs.
+     */
+    inline void Process(int32_t *buffer, size_t frames)
+    {
+        // Detection on the raw input of this block
+        int32_t peak_l = 0, peak_r = 0;
+        for (size_t i = 0; i < frames; i++)
+        {
+            int32_t l = buffer[2 * i], r = buffer[2 * i + 1];
+            l = l < 0 ? -l : l;
+            r = r < 0 ? -r : r;
+            peak_l = l > peak_l ? l : peak_l;
+            peak_r = r > peak_r ? r : peak_r;
+        }
+        uint32_t n = static_cast<uint32_t>(frames);
+        mono_left_count_ = (peak_l > kOnLevel && peak_r < kOffLevel) ? mono_left_count_ + n : 0;
+        mono_right_count_ = (peak_r > kOnLevel && peak_l < kOffLevel) ? mono_right_count_ + n : 0;
+        stereo_count_ = (peak_l > kOnLevel && peak_r > kOnLevel) ? stereo_count_ + n : 0;
+
+        if (mono_left_count_ >= kMonoSamples)
+        {
+            state_ = State::MONO_LEFT;
+        }
+        else if (mono_right_count_ >= kMonoSamples)
+        {
+            state_ = State::MONO_RIGHT;
+        }
+        else if (stereo_count_ >= kStereoSamples)
+        {
+            state_ = State::STEREO;
+        }
+
+        // Switch the copy direction only while fully faded out
+        if (state_ != State::STEREO && (mix_ == 0 || state_ == source_))
+        {
+            source_ = state_;
+        }
+        int32_t target = (state_ != State::STEREO && state_ == source_) ? 32767 : 0;
+
+        if (mix_ == 0 && target == 0)
+        {
+            return; // stereo, nothing to do
+        }
+
+        int src = source_ == State::MONO_LEFT ? 0 : 1;
+        for (size_t i = 0; i < frames; i++)
+        {
+            if (mix_ < target)
+            {
+                mix_ = mix_ + kFadeStep > target ? target : mix_ + kFadeStep;
+            }
+            else if (mix_ > target)
+            {
+                mix_ = mix_ - kFadeStep < target ? target : mix_ - kFadeStep;
+            }
+            int32_t a = buffer[2 * i + src];
+            int32_t b = buffer[2 * i + 1 - src];
+            buffer[2 * i + 1 - src] = Sat16(b + (((a - b) * mix_) >> 15));
+        }
+    }
+
+private:
+    State state_ = State::STEREO;
+    State source_ = State::MONO_LEFT;
+    int32_t mix_ = 0;
+    uint32_t mono_left_count_ = 0;
+    uint32_t mono_right_count_ = 0;
+    uint32_t stereo_count_ = 0;
 };
 
 } // namespace kastle2::fxplus

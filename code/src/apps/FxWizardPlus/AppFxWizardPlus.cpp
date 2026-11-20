@@ -140,6 +140,7 @@ void AppFxWizardPlus::Init()
     plate_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     pitch_shifter_.Init(delay_left_->GetBuffer(), delay_left_->GetMaxLength(), delay_right_->GetBuffer(), delay_right_->GetMaxLength());
     notch_.Reset();
+    mono_normalizer_.Reset();
     delay_pool_dirty_ = false; // the delay lines start out zeroed
     delay_compressor_.Init(SAMPLE_RATE / delay_peak_counter_max_);
     delay_compressor_.SetAttackTime(50.f / 1000.f);
@@ -248,6 +249,10 @@ FASTCODE void AppFxWizardPlus::AudioLoop(q15_t *input, q15_t *output, size_t siz
     {
         return;
     }
+
+    // Mono input (only one side has signal): copy it to the other side, so every effect and the dry path
+    // play on both outputs. Done in place, the second core reads the same buffer for the dry signal.
+    mono_normalizer_.Process(input, size);
 
     // Autofreeze pots
     for (auto &pot : pots_)

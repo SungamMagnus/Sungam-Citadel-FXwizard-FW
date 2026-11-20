@@ -17,6 +17,13 @@ Crusher, Slicer, Replayer, Pitcher and Shifter were removed.
 For the new modes, Amount at zero is a clean bypass. The DJ filter (shift + Feedback knob) works in every mode.
 A trigger restarts the chorus LFO; in the other modes it only blinks the LEDs.
 
+Mono and stereo input: every mode works with both. When only one input has signal (a mono cable in a stereo jack) and the
+other stays silent for about 250 ms, the silent side gets a copy of the active one, faded in over 10 ms. As soon as both
+sides carry their own signal for about 50 ms it goes back to stereo. Real stereo input is never changed. Delay, chorus,
+notch filter, pitch shifter and distortion process left and right separately (the delay, chorus and pitch shifter add width
+with the Stereo knob). Both reverbs sum the input to mono for the wet signal and spread it wide, the dry signal stays stereo.
+The "audio in behavior" setting of the advanced settings (mix L+R to mono) still works as before, on top of this.
+
 About the two reverbs:
 - **Hall** is a Schroeder / Freeverb style design (8 damped combs and 4 all-passes per side). Sparser, with a
   room-like character. The decay time is set per comb, so it is the same at every setting.
@@ -45,8 +52,8 @@ The UF2 ends up in `code/build/output`. It uses app ID `0x7F` (community range),
 EEPROM and never touches the settings of the stock FX Wizard (`0xB1`). Calibration is stored separately and is not
 affected. If you distribute this, register an ID in [APP_LIST.md](../../../../APP_LIST.md) first.
 
-Size (Release, Arm GNU Toolchain 14.2.Rel1, Pico SDK 2.3.1), compared with the stock FX Wizard: flash 429,484 B
-(81.9% of 512 KB, stock 431,828 B), static RAM 23,216 B (stock 23,028 B), FASTCODE 9,208 B of 16 KB.
+Size (Release, Arm GNU Toolchain 14.2.Rel1, Pico SDK 2.3.1), compared with the stock FX Wizard: flash 430,044 B
+(82.0% of 512 KB, stock 431,828 B), static RAM 23,240 B (stock 23,028 B), FASTCODE 9,736 B of 16 KB.
 
 Outside the Nix shell, with Arm's own toolchain package, the link can fail with `undefined reference to __dso_handle`
 (it happens with the stock FX Wizard too: the link uses `-nostartfiles`). Adding
@@ -77,5 +84,5 @@ clang++ -std=c++20 -O1 -g -fsanitize=address,undefined -I.. fxplus_test.cpp -o f
 ./fxplus_test demos/     # also render WAV demos into demos/ (directory must exist)
 ```
 
-This checks, among others: reverb RT60 against the requested decay, tails decaying to silence, notch depth and width, pitch accuracy and clean unity, distortion level compensation and DC offset, and that nothing leaves the 16 bit range or touches memory
+This checks, among others: reverb RT60 against the requested decay, tails decaying to silence, notch depth and width, mono input detection and that a mono input plays on both sides of every effect, pitch accuracy and clean unity, distortion level compensation and DC offset, and that nothing leaves the 16 bit range or touches memory
 outside its buffers. It does not check the app glue, the CPU load or how it sounds on the hardware.

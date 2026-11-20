@@ -276,6 +276,9 @@ private:
     int32_t pitch_shifter_semitones_key_ = INT32_MIN; // for detecting changes
     int32_t pitch_shifter_detune_key_ = INT32_MIN;
 
+    // a mono input (one side silent) is copied to both sides before anything else
+    fxplus::MonoNormalizer mono_normalizer_;
+
     // notch filter with drive
     fxplus::NotchDrive notch_;
     q15_t notch_dry_ = Q15_MAX;
